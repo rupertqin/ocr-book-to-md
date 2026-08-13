@@ -31,6 +31,7 @@ ocr-book-to-md/
 ├── ocr_batch.swift      # ① OCR 引擎（macOS Vision，zh-Hans + en）
 ├── detect_figs.py      # ② 图/标题/正文三分检测（核心算法）
 ├── build_md.py         # ③ 组装 Markdown（章节边界自动推导）
+├── requirements.txt    # Python 依赖（Pillow、numpy）
 ├── README.md
 ├── data/                # 输入：示例书《进化心理学》第 6 版截图（687 张）
 │   └── images/      687 张原图 p3.png..p692.png
@@ -56,6 +57,9 @@ python3 run.py --images data/images --out out
 
 # 复用已有 OCR 结果（跳过 Swift OCR，秒级）：
 python3 run.py --force-ocr  # 强制重跑 OCR；默认自动复用 out/ocr 缓存
+
+# 换书/换截图目录：文件名任意，自动从文件名提取数字页号排序
+python3 run.py --images data/origin      # 支持 screenshot_page_N.png 等任意命名
 ```
 
 首次运行自动执行三步（OCR → 布局分析 → 组装），OCR 产物落在 `out/ocr/`；重跑自动复用该缓存。输出为**自包含集合**，可直接拷贝/发布：
@@ -71,9 +75,14 @@ out/
 ### 分步执行（调试/换书时用）
 
 ```bash
-# ① OCR：扫描页 → 文本 + 坐标（首次或换书时执行，产物进 out/ocr/）
-swift ocr_batch.swift <imgDir> <txtDir> <jsonDir> [startPage] [endPage]
-# 例：swift ocr_batch.swift data/images out/ocr/pages out/ocr/pages_json 3 692
+# ① OCR：扫描页 → 文本 + 坐标（建议直接用 run.py，它会自动预处理 + 探测页码）
+#    如需手动跑，须先把源图统一转成 JPEG（ImageIO 解 PNG 会 SIGBUS），例如：
+python3 -c "
+from PIL import Image; import glob, os
+for f in glob.glob('data/images/*.png'):
+    im = Image.open(f); im.convert('RGB').save(f, 'JPEG')
+"  # 仅示意；正式请用 run.py
+# swift ocr_batch.swift <imgDir> <txtDir> <jsonDir> [startPage] [endPage]
 
 # ② 检测：坐标 JSON + 原图 → 图/标题/正文三分
 #    路径默认值内化：OCR 坐标 = <out-dir>/ocr/pages_json（自动推导），可零参数裸跑
@@ -89,6 +98,13 @@ python3 build_md.py --out-dir out
 
 - macOS 13+（Vision 框架）、`swiftc`（随 Xcode Command Line Tools）
 - Python 3.10+，依赖：`Pillow`、`numpy`
+
+安装依赖（建议先建一个虚拟环境）：
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
 
 ---
 
@@ -169,6 +185,9 @@ python3 build_md.py --out-dir out
 - 无"图X.X"标题、内容稀疏的小图检不出（如 p57 的 2.5 小图），OCR 会泄漏几行坐标数字到文本流。
 - 部分"学习目标"编号行（"1.界定策略干扰理论"）字号略大，被误判为 `###`。
 - 跨页表格的"（续）"表头在下一页作为文本保留（非错误）。
+- **macOS ImageIO 解码"任何 PNG"都会 SIGBUS**：`CGImageSourceCreateImageAtIndex` 在解码 PNG 格式时必崩（`exit 138`）。经多重对照实验证实与磁盘位置、Alpha 通道、图片内容**均无关**：复制到本地盘仍崩、转成无 Alpha 的 RGB PNG 仍崩、PIL 新生成的极简 PNG 也崩——**ImageIO 在此系统上解 PNG 本身就崩**，而解 JPEG 绝对稳定。`run.py` 的 OCR 前置预处理 `prepare_images` **无条件把所有源图转成 JPEG** 再交给 Swift，彻底消除崩溃（已验证再转 JPEG 不影响 OCR 精度，字节级一致）。
+
+> 排查弯路：曾误判为"内存不足"（`vm_stat` free 页低）、"Vision 框架 bug"（换参数、降采样均无效）。最终用 `file` 对比正常页与崩溃页才发现格式差异，再经对照实验确认是"ImageIO 解 PNG 本身必崩"。本书多数页虽是 `.png` 扩展名但实为 JPEG 内容（故正常），少数真 PNG 页必崩。
 - 阈值针对正文 45–50px 的书籍调校；换书时若字号差异大，需调整 `detect_figs.py` 顶部的阈值常量。
 
 ---
