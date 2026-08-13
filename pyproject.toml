@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocr-book-to-md"
+version = "0.1.0"
+description = "扫描书转 Markdown（OCR → 图 / 标题 / 正文三分），输出可嵌入 document-factory PDF 流程"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow",
+    "numpy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+ocr-book-to-md = "ocr_book_to_md.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
