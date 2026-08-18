@@ -91,13 +91,26 @@ def _col_sat(rgb):
     return (mx - mn) / mx if mx > 25 else 0.0
 
 
-def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H, exclude_ranges=()):
+def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
+                     exclude_ranges=(), min_heading_ratio=1.28, global_body_h=None):
+    """检测标题。
+
+    h_ratio 用全局正文基准 global_body_h 计算（跨页面统一），保证标题字号
+    与正文字号的比较在全书中稳定有效，而非受单页正文行高估算波动影响。
+    若未传 global_body_h，回退用本页 body_h。
+
+    min_heading_ratio: 彩色标题（`##`）的最小行高比例。真实标题字号明显大于正文
+    （如"悖论系列N"1.31+/"第X章"1.29+），正文里独立成行的诗歌/脚注行字号接近
+    正文（1.07~1.27×）。设 1.28 可过滤后者。可经 config `detect.min_heading_ratio` 调整。
+    """
+    # global_body_h 传归一化正文行高中位数（跨页统一），换算成当前页像素：*H
+    base_h = (global_body_h * H) if global_body_h else body_h
     excl = [(e0 - 4, e1 + 4) for (e0, e1) in exclude_ranges]
     candidates = []
     for i, line in enumerate(px):
         if FIG_RE.search(line["text"]) or TBL_RE.search(line["text"]):
             continue
-        h_ratio = line["h"] / body_h
+        h_ratio = line["h"] / base_h
         w = line["w"]
         if h_ratio > 2.2:
             continue
@@ -106,7 +119,8 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H, exclude_ranges
             continue
         col = _line_text_color(img_rgb, line, W, H)
         sat = _col_sat(col) if col else 0.0
-        if col and sat > 0.25 and h_ratio >= 1.06 and 0.10 * page_w < w <= 0.95 * page_w:
+        if col and sat > 0.25 and h_ratio >= min_heading_ratio \
+                and 0.10 * page_w < w <= 0.95 * page_w:
             candidates.append((i, 2))
         elif (not col or sat < 0.35) and h_ratio >= 1.18 \
                 and 0.14 * page_w <= w <= 0.92 * page_w:
@@ -134,7 +148,12 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H, exclude_ranges
         below = [l for l in px if l["y_top"] >= g_bot]
         gap_up = g_top - (max((l["y_bottom"] for l in above), default=0))
         gap_dn = (min((l["y_top"] for l in below), default=H) - g_bot)
-        if gap_up < 0.6 * body_h or gap_dn < 0.6 * body_h:
+        # 标题须周围有足够留白（避免被紧贴的正文行干扰）；候选已是明显大于正文的字号
+        g_h_ratio = max(px[i]["h"] for i, _ in g) / base_h
+        min_gap = 0.6 * body_h
+        if g_h_ratio < min_heading_ratio * 0.92:
+            min_gap = 1.2 * body_h
+        if gap_up < min_gap or gap_dn < min_gap:
             continue
         up = img_gray[max(0, int(g_top) - 24):int(g_top), :]
         dn = img_gray[int(g_bot):min(H, int(g_bot) + 24), :]
@@ -416,7 +435,8 @@ def _swap_in(tmp, dst):
         pass
 
 
-def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp):
+def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1.28,
+                  global_body_h=None):
     jpath = os.path.join(json_dir, f"{n}.json")
     ipath = os.path.join(img_dir, f"p{n}.jpg")
     if not os.path.exists(ipath):
@@ -436,7 +456,9 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp):
 
     passA = _pass_a_regions(px, W, H, img_gray, body_h, paras, n=n)
     heading_by_line = _detect_headings(px, body_h, W, img_rgb, img_gray, W, H,
-                                       exclude_ranges=[(r[0], r[1]) for r in passA])
+                                       exclude_ranges=[(r[0], r[1]) for r in passA],
+                                       min_heading_ratio=min_heading_ratio,
+                                       global_body_h=global_body_h)
     heading_rows = [(px[i]["y_top"], px[i]["y_bottom"]) for i in heading_by_line]
     passB = _pass_b_regions(px, W, H, img_gray, body_h, paras, passA,
                             heading_rows, n=n)
@@ -451,7 +473,8 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp):
         crop.save(os.path.join(fig_tmp, fname))
         img_boxes.append((fy0, fy1, kind))
         blocks.append({"type": "image", "file": fname, "y_top": fy0,
-                       "y_bottom": fy1, "kind": kind, "caption": cap})
+                       "y_bottom": fy1, "x0": fx0, "x1": fx1,
+                       "kind": kind, "caption": cap})
 
     for i, t in enumerate(px):
         is_caption = bool(FIG_RE.search(t["text"]) or TBL_RE.search(t["text"]))
@@ -499,6 +522,13 @@ def detect(project, img_dir, pages=None):
     blocks_dir = str(project.get_blocks_dir())
     fig_dir = str(project.get_figs_dir())
 
+    # 彩色标题（`##`）最小行高比例（跨页面统一基准）：
+    # 真标题字号明显大于正文（"悖论系列N"1.31+/"第X章"1.29+），
+    # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27×）。设 1.28 过滤后者。
+    # 可配置 detect.min_heading_ratio。
+    from .config import Config
+    min_heading_ratio = float(Config(str(project.path)).get('detect.min_heading_ratio', 1.28))
+
     if not os.path.isdir(json_dir):
         raise SystemExit(f"错误：未找到 OCR 坐标目录 {json_dir}\n"
                          f"  请先运行 OCR：python main.py ocr -p <project>")
@@ -506,18 +536,49 @@ def detect(project, img_dir, pages=None):
         raise SystemExit(f"错误：未找到截图目录 {img_dir}\n"
                          f"  请用 --images 指定正确的截图目录")
 
+    # 计算全书统一正文基准行高（跨页面有效）：所有页 OCR 行高的中位数。
+    # 标题字号与正文字号的比较用全局基准，避免单页 body_h 估算波动。
+    _hs = []
+    if pages is None:
+        _all_pages = sorted(int(os.path.splitext(f)[0])
+                            for f in os.listdir(json_dir)
+                            if f.endswith(".json"))
+    else:
+        _all_pages = pages
+    for _n in _all_pages:
+        _p = os.path.join(json_dir, f"{_n}.json")
+        if not os.path.exists(_p):
+            continue
+        try:
+            with open(_p, encoding="utf-8") as _f:
+                _d = json.load(_f)
+            _hs.extend(ln["h"] for ln in _d.get("lines", []))
+        except Exception:
+            continue
+    # 全局正文基准（归一化行高中位数，跨页统一）。_detect_headings 里会 ×H 换算成像素。
+    global_body_h = float(np.median(_hs)) if _hs else None
+
+    # 清理历史遗留的临时目录
+    out_str = str(project.output_dir)
+    for name in os.listdir(out_str):
+        p = os.path.join(out_str, name)
+        if os.path.isdir(p) and name.startswith((".blocks.tmp.", ".figs.tmp.",
+                                                 ".md.tmp.", ".article.tmp.")):
+            shutil.rmtree(p, ignore_errors=True)
+            print(f"  清理历史临时目录: {p}")
+
     blocks_tmp = os.path.join(project.output_dir, f".blocks.tmp.{os.getpid()}")
     fig_tmp = os.path.join(project.output_dir, f".figs.tmp.{os.getpid()}")
     os.makedirs(blocks_tmp, exist_ok=True)
     os.makedirs(fig_tmp, exist_ok=True)
 
     if pages is None:
-        pages = sorted(int(os.path.splitext(f)[0])
-                       for f in os.listdir(json_dir)
-                       if f.endswith(".json"))
+        pages = _all_pages
     total = 0
     for n in pages:
-        r = _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp)
+        r = _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp,
+                          min_heading_ratio=min_heading_ratio,
+                          global_body_h=global_body_h)
         if r:
             total += r
     _swap_in(blocks_tmp, blocks_dir)

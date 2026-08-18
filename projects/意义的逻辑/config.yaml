@@ -1,0 +1,28 @@
+book:
+  name: 意义的逻辑
+  images_dir: data/images
+  start_page: null
+  end_page: null
+  force_ocr: false
+detect:
+  min_heading_ratio: 1.28
+pipeline:
+  pdf: textOnImg
+pdf:
+  document_factory: ''
+  title: 意义的逻辑
+  subtitle: ''
+  statement: null
+  engine: weasyprint
+  chunk_articles: null
+  page_margin: 1.5cm 2cm
+  mode: full
+  font_family: Hiragino Sans GB
+  menu_skip_articles: 2
+  punct_compress:
+    、。，”（《【…: -0.1em
+  cover_images:
+  - output/imgpdf_source/cover.jpg
+  show_cover: false
+  numbered: false
+  compress: true

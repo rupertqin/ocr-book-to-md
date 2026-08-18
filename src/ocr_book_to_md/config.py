@@ -222,6 +222,17 @@ book:
   end_page: null      # 结束页（默认自动探测）
   force_ocr: false    # 忽略 OCR 缓存，强制重跑
 
+# 布局检测参数
+detect:
+  min_heading_ratio: 1.28  # 标题字号 / 正文字号 的最小比例（跨页面统一基准，相对全书正文）。
+                      # 真实标题字号明显大于正文（"悖论系列N"1.31+/"第X章"1.29+）；
+                      # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27）。
+                      # 调高过滤更多误判，调低保留更多小字号标题。
+
+# 全部流程（pipeline）最终 PDF 方式
+pipeline:
+  pdf: text          # text(文字流) / img(原图片) / textOnImg(文字置于图)。命令行 --pdf 可覆盖
+
 # document-factory PDF 流程（把 output/content/ 交给它生成 PDF）
 pdf:
   document_factory: ""   # document-factory 项目路径（main.py 所在目录）
@@ -232,6 +243,14 @@ pdf:
   chunk_articles: null   # 每册最大章数（null=不分册）
   jobs: 4
   mode: full             # full | incremental
+  page_margin: "1.5cm 2cm"  # 正文页边距（CSS margin 简写，封面 cover_images 不受影响）
+  font_family: ""        # layedpdf 字体族，如 "PingFang SC"、"Noto Sans CJK SC"（空=系统默认）
+  justify: true          # layedpdf 段落是否两端对齐
+  width_scale: 1.0       # layedpdf 文字容器宽度系数（<1 适配宽字体标点，如 0.95）
+  letter_spacing: ""     # layedpdf CSS letter-spacing，如 "-0.02em" 轻微压缩
+  punct_compress: ""     # layedpdf 标点压缩 CSS 值，如 "-0.1em"（统一压缩）
+                         #   也可用 dict 按标点类别分开设置，如：
+                         #   punct_compress: {"，、。": "-0.3em", "（）《》【】": "-0.2em"}
 """
         self.config_file.write_text(template, encoding='utf-8')
 

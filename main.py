@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 ocr-book-to-md - 扫描书转 Markdown 的统一入口
 

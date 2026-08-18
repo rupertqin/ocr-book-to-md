@@ -30,7 +30,7 @@
 
 ```
 ocr-book-to-md/
-├── main.py                       # 统一 CLI 入口（ocr/detect/build/pdf/all）
+├── main.py                       # 统一 CLI 入口（ocr/detect/build/pdf/pipeline 等）
 ├── pyproject.toml                # 项目配置与依赖（src 布局）
 ├── requirements.txt              # Python 依赖（Pillow、numpy、pyyaml）
 ├── README.md
@@ -67,31 +67,148 @@ ocr-book-to-md/
 
 ```bash
 # 1. 初始化项目（生成 config.yaml + .env + data/images/）
-python3 main.py init -p ./projects/进化心理学
+python main.py init -p ./projects/进化心理学
 
 # 2. 把书的截图放入 projects/进化心理学/data/images/
 
-# 3. 一键全流程：OCR → 检测 → 组装 → PDF
-python3 main.py all -p ./projects/进化心理学
+# 3. 一键全流程（最终 PDF 方式默认 text，也可 --pdf img/textOnImg）
+python main.py pipeline -p ./projects/进化心理学
 
-# 只到组装为止，不生成 PDF
-python3 main.py all -p ./projects/进化心理学 --no-pdf
+# 只到流程中间产物为止，不生成 PDF
+python main.py pipeline -p ./projects/进化心理学 --no-pdf
 ```
 
 ### 分步执行（调试/换书时用）
 
 ```bash
 # ① OCR：扫描页 → 文本 + 坐标（复用缓存，强制重跑加 --force-ocr）
-python3 main.py ocr -p ./projects/进化心理学
+python main.py ocr -p ./projects/进化心理学
 
 # ② 检测：坐标 JSON + 原图 → 图/标题/正文三分
-python3 main.py detect -p ./projects/进化心理学
+python main.py detect -p ./projects/进化心理学
 
-# ③ 组装：blocks → 章节 Markdown + article 目录
-python3 main.py build -p ./projects/进化心理学
+# ③ 组装（仅文字流需要）：blocks → 章节 Markdown + article 目录
+python main.py build -p ./projects/进化心理学
 
-# ④ PDF：把 content/ 交给 document-factory 生成 PDF
-python3 main.py pdf -p ./projects/进化心理学
+# ④ PDF：三种方式用 --type 指定（按需选用）
+python main.py pdf -p ./projects/进化心理学 --type text        # 文字流（document-factory，需先 build）
+python main.py pdf -p ./projects/进化心理学 --type textOnImg   # 文字置于图（按原书坐标，需先 ocr+detect，无需 build）
+python main.py pdf -p ./projects/进化心理学 --type img         # 原图片（纯图，无需 OCR/detect/build）
+```
+
+---
+
+## 三种 PDF 制作方式（`pipeline --pdf`）
+
+本项目提供 **三种 PDF 制作方式**，通过 `pipeline` 命令的 `--pdf` 参数指定，也可在 `config.yaml` 配 `pipeline.pdf` 作为默认流程。三者作为流水线的最终输出方式，可自由切换。
+
+**文件名规则**：`<书名>.<方式后缀>.unc.pdf`（未压缩），压缩后去掉 `.unc` 变 `<书名>.<方式后缀>.pdf`。`text` 为默认无方式后缀；`.unc` 是 document-factory 的压缩标记，放最后。
+
+| 方式 | 未压缩 | 压缩后 |
+|------|--------|--------|
+| `text` | `<书名>.unc.pdf` | `<书名>.pdf` |
+| `img` | `<书名>.img.unc.pdf` | `<书名>.img.pdf` |
+| `textOnImg` | `<书名>.textOnImg.unc.pdf` | `<书名>.textOnImg.pdf` |
+
+| `--pdf` 值 | 名称 | 原理 | 文字可复制 | 版式贴近原书 |
+|-----------|------|------|:---:|:---:|
+| `text` | 文字流 | OCR 出文字 → Markdown → document-factory 排版 | ✅ | ❌（重排） |
+| `img` | 原图片 | 页面图直接转 PDF（封面 cover.jpg），走 cover_images | ❌（纯图） | ✅（原样） |
+| `textOnImg` | 文字置于图 | 用 OCR 文字坐标 + detect 图片区域，按原书位置绝对定位 | ✅ | ✅（按坐标） |
+
+> `--pdf` 取值用**方式名**（`text` / `img` / `textOnImg`），对应底层命令 `pdf` / `imgpdf` / `layedpdf`。
+
+```bash
+# 全部流程（默认读 config.pipeline.pdf，未配置则 text）
+python main.py pipeline -p ./projects/<书名>
+
+# 指定最终 PDF 方式
+python main.py pipeline -p ./projects/<书名> --pdf text        # 文字流（→ pdf）
+python main.py pipeline -p ./projects/<书名> --pdf textOnImg   # 文字置于图（→ layedpdf）
+python main.py pipeline -p ./projects/<书名> --pdf img         # 原图片（→ imgpdf）
+```
+
+> 三种方式都是 `pipeline` 的可配置流程参数，`pipeline --pdf text` 等价于原来的 `all` 一键流程。
+
+- **text（文字流）**：`ocr → detect → build → pdf`。文字可复制/搜索，但版式重排。适合要可检索文字、不介意版式。
+- **textOnImg（文字置于图）**：`ocr → detect → layedpdf`。按原书坐标摆放文字+图片，既贴近原书又文字可复制。适合既要版式又要文字。
+- **img（原图片）**：直接 `imgpdf`（无需 OCR）。纯扫描图原样。适合只要原书扫描件。
+
+在 `config.yaml` 配置默认流程：
+
+```yaml
+pipeline:
+  pdf: textOnImg   # text / img / textOnImg（命令行 --pdf 可覆盖）
+```
+
+### ① 文字流（`pdf --type text`）
+
+走"OCR → 布局分析 → Markdown → document-factory"完整流水线，产出**可复制的章节文字 PDF**。
+
+```bash
+# 仅生成文字流 PDF（需先跑过 ocr/detect/build）
+python main.py pdf -p ./projects/<书名> --type text
+
+# 或一键全流程
+python main.py pipeline -p ./projects/<书名> --pdf text
+```
+
+产物：`output/normal/<书名>.unc.pdf`（text 流未压缩，默认无方式后缀）；压缩后 `<书名>.pdf`。中间产物 `output/md/`（章节 Markdown）、`output/content/`（article_N.md，供 document-factory 读取）。
+
+相关配置（`config.yaml` 的 `pdf:` 段）：`title`（封面标题）、`page_margin`（页边距）、`engine`（weasyprint/reportlab）、`chunk_articles`（分册）、`statement`（免责声明）等。
+
+### ② 原图片（`pdf --type img`）
+
+图片文件夹**直接做成 PDF**，封面用文件夹下 `cover.jpg`，走 document-factory 的 `cover_images`（每图一页、整页铺满 A4）。**无需 OCR**。
+
+```bash
+# 图片目录结构（页面图任意命名，按文件名数字排序；封面 cover.jpg 可选）
+页面图目录/
+├── cover.jpg      # 封面（第一页，可选）
+├── p1.png / p2.png / p3.png ...
+
+# 仅生成原图片 PDF（默认用项目 data/images；也可用 -i 指定别的目录）
+python main.py pdf -p ./projects/<书名> --type img
+python main.py pdf -p ./projects/<书名> --type img -i ./页面图目录
+python main.py pdf -p ./projects/<书名> --type img --no-pdf   # 只准备结构不生成
+
+# 或一键全流程
+python main.py pipeline -p ./projects/<书名> --pdf img
+```
+
+产物：`output/normal/<书名>.img.unc.pdf`（未压缩）；压缩后 `<书名>.img.pdf`。封面无边距 + 内容页有边距。
+
+> `cover_images` 在 document-factory 是"整页铺满无边距"（适合封面/插页）；内容页走正文文章（有 `page_margin` 边距）。
+
+### ③ 文字置于图（`pdf --type textOnImg`）
+
+用 OCR 的**文字坐标** + detect 的**图片区域**，把文字行与裁图按**原书位置**用 CSS `position:absolute` 绝对定位，排版成接近原书、且**文字可复制**的 PDF。**需先跑过 `ocr`+`detect`**。
+
+```bash
+# 仅生成文字置于图 PDF（需先跑过 ocr/detect）
+python main.py pdf -p ./projects/<书名> --type textOnImg
+python main.py pdf -p ./projects/<书名> --type textOnImg -o output/自定义.pdf --font "PingFang SC"
+python main.py pdf -p ./projects/<书名> --type textOnImg --pages 52 53   # 只渲染指定页（调试）
+
+# 或一键全流程
+python main.py pipeline -p ./projects/<书名> --pdf textOnImg
+```
+
+产物：`output/normal/<书名>.textOnImg.unc.pdf`（未压缩）；压缩后 `<书名>.textOnImg.pdf`。封面 cover.jpg 整页铺满 + 内容页按坐标混排。
+
+**排版配置**（`config.yaml` 的 `pdf:` 段，`layedpdf` 专用）：
+
+```yaml
+pdf:
+  font_family: "Hiragino Sans GB"   # 字体族
+  page_margin: "1.5cm 2cm"          # 页边距
+  justify: true                     # 段落两端对齐
+  width_scale: 0.96                 # 文字容器宽度系数（<1 适配宽字体）
+  letter_spacing: "-0.02em"         # 整体字距压缩
+  punct_compress:                   # 标点压缩（按类别分开设置）
+    "，、。": "-0.3em"
+    "？！；：": "-0.25em"
+    "（）《》【】…—·": "-0.2em"
 ```
 
 ---
@@ -110,6 +227,12 @@ book:
   end_page: null          # 结束页（默认自动探测）
   force_ocr: false        # 忽略 OCR 缓存，强制重跑
 
+detect:                   # 布局检测参数
+  min_heading_ratio: 1.28 # 标题字号/正文字号 最小比例（跨页面统一基准，相对全书正文）。
+                          # 真标题字号明显大于正文（如"第X章"/"悖论系列N" 1.29+）；
+                          # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27）会被过滤。
+                          # 调高过滤更多误判，调低保留更多小字号标题。
+
 pdf:                      # document-factory PDF 流程
   document_factory: ""    # document-factory 项目路径（main.py 所在目录；留空自动猜同级 ../document-factory）
   title: ""               # PDF 封面大标题（默认书名）
@@ -119,6 +242,7 @@ pdf:                      # document-factory PDF 流程
   chunk_articles: null    # 每册最大章数（null=不分册）
   jobs: 4
   mode: full              # full | incremental
+  page_margin: "1.5cm 2cm" # 正文页边距（CSS margin 简写，封面 cover_images 不受影响）
 ```
 
 ### 配置优先级
@@ -150,17 +274,56 @@ python document-factory/main.py pdf -p <ocr-book-to-md>/projects/<书名>
 ```
 
 因此你可以：
-- 直接用 `python3 main.py pdf -p <项目>` 一键生成 PDF；
+- 直接用 `python main.py pdf -p <项目>` 一键生成 PDF；
 - 或手动进入 document-factory 目录，用它的全部 PDF 能力（分册、shuffle/sand、publications、压缩等）处理 `output/content/`。
 
 > 注：`pdf.document_factory` 未配置时，默认猜工作区同级目录 `../document-factory`；也可用环境变量 `OCR_TO_MD_DF` 或 `.env` 的 `PDF_DOCUMENT_FACTORY` 指定。
 
 ---
 
+## 图片直转 PDF（`imgpdf`，无需 OCR/MD）
+
+当手头只有扫描页图片、不需要转文字时，可用 `pdf --type img` 命令把图片文件夹**直接做成 PDF**，封面用文件夹下的 `cover.jpg`，复用 document-factory 的 `cover_images` 机制（每图一页、整页铺满 A4）。
+
+```bash
+# 图片目录结构（页面图任意命名，按文件名数字排序；封面 cover.jpg 可选）
+页面图目录/
+├── cover.jpg      # 封面（第一页，可选）
+├── p1.png / p2.png / p3.png ...
+```
+
+```bash
+# 一键：图片 → PDF（默认用项目的 data/images；也可在 config 配 book.images_dir）
+python main.py pdf -p ./projects/影印本 --type img
+
+# 从别的目录生成（-i 可覆盖默认图片目录）
+python main.py pdf -p ./projects/影印本 --type img -i ./页面图目录
+
+# 只准备结构不生成 PDF（调试）
+python main.py pdf -p ./projects/影印本 --type img --no-pdf
+```
+
+> `-i/--images` 参数可选：图片目录优先级为 `-i 命令行 > config.book.images_dir > 项目 data/images`。图片放在项目 `data/images/` 下（或配置好 `book.images_dir`）时，可完全省略 `-i`。
+
+实现原理：
+1. 扫描图片目录，`cover.jpg`（或 `cover.png`）作为封面，其余图片按页号排序；
+2. **封面**走 document-factory 的 **`cover_images`**（`pdf.cover_images`）：每张图一页、**整页铺满无边距**；
+3. **内容页**走**正文文章**：生成单篇 `article_0.md`（标题=书名），每张图一个 `<div class="page-break">`，**每页一图、带正文页边距**；
+4. config 写入 `pdf.show_cover=false`（避免重复文字封面）、`pdf.numbered=false`（去掉标题编号）；
+5. 调用 document-factory 的 `pdf`，单篇文章 → 自动不生成目录。
+
+产物：`output/content/`（结构）+ `output/normal/<书名>.img.unc.pdf`（未压缩）。封面副本放在 `output/imgpdf_source/`（供 cover_images 相对引用）。
+
+> 封面 vs 内容页边距：`cover_images` 是 document-factory 故意做成的整页铺满（无边距），适合封面/插页；内容页走正文文章则有 `@page` 边距（默认 1.5cm×2cm）+ 图片边距，适合正文页留白。
+
+> 与 OCR→MD 流程的区别：`imgpdf` 完全跳过 OCR/检测/组装，直接把图片页做成 PDF，适合纯影印/扫描件转 PDF 场景；需要文字提取时才用 `pipeline --pdf text`（或 `textOnImg`）流程。
+
+---
+
 ## 安装
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -248,7 +411,7 @@ pip install -r requirements.txt
 ## 复现当前产物（示例书）
 
 ```bash
-python3 main.py init -p ./projects/进化心理学
+python main.py init -p ./projects/进化心理学
 # 把 data/images 的截图放入 projects/进化心理学/data/images/
-python3 main.py all -p ./projects/进化心理学
+python main.py pipeline -p ./projects/进化心理学
 ```

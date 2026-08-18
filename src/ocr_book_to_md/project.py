@@ -60,15 +60,20 @@ class Project:
         return self.output_dir / "md"
 
     def get_content_dir(self) -> Path:
-        """document-factory 读取的输入目录：output/content/"""
+        """text 流（文字版）document-factory 读取的输入目录：output/content/"""
         return self.output_dir / "content"
 
     def get_article_dir(self) -> Path:
         return self.output_dir / "content"
 
     def get_images_out_dir(self) -> Path:
-        """document-factory 读取的图片目录：output/content/images/"""
+        """text 流图片目录：output/content/images/"""
         return self.output_dir / "content" / "images"
+
+    def get_content_img_dir(self) -> Path:
+        """img 流（原图片）独立的 document-factory 输入目录：output/content_img/
+        （与 text 流的 output/content/ 隔离，避免互相污染）"""
+        return self.output_dir / "content_img"
 
     def get_broken_file(self) -> Path:
         return self.output_dir / "ocr" / "broken.txt"
