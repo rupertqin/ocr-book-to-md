@@ -25,3 +25,4 @@ pdf:
   show_cover: false
   numbered: false
   compress: true
+  output_dir: dist

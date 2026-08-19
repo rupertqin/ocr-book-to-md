@@ -241,6 +241,7 @@ pdf:
   jobs: 4
   mode: full             # full | incremental
   page_margin: "1.5cm 2cm"  # 正文页边距（CSS margin 简写，封面 cover_images 不受影响）
+  output_dir: dist       # PDF 输出目录（相对 output/，如 dist / normal / pdf）
   font_family: ""        # layedpdf 字体族，如 "PingFang SC"、"Noto Sans CJK SC"（空=系统默认）
   justify: true          # layedpdf 段落是否两端对齐
   width_scale: 1.0       # layedpdf 文字容器宽度系数（<1 适配宽字体标点，如 0.95）

@@ -197,7 +197,7 @@ python main.py pdf -p ./projects/<书名> --type text
 python main.py pipeline -p ./projects/<书名> --pdf text
 ```
 
-产物：`output/normal/<书名>.unc.pdf`（text 流未压缩，默认无方式后缀）；压缩后 `<书名>.pdf`。中间产物 `output/md/`（章节 Markdown）、`output/content/`（article_N.md，供 document-factory 读取）。
+产物：`output/dist/<书名>.unc.pdf`（text 流未压缩，默认无方式后缀）；压缩后 `<书名>.pdf`。中间产物 `output/md/`（章节 Markdown）、`output/content/`（article_N.md，供 document-factory 读取）。
 
 相关配置（`config.yaml` 的 `pdf:` 段）：`title`（封面标题）、`page_margin`（页边距）、`engine`（weasyprint/reportlab）、`chunk_articles`（分册）、`statement`（免责声明）等。
 
@@ -220,7 +220,7 @@ python main.py pdf -p ./projects/<书名> --type img --no-pdf   # 只准备结�
 python main.py pipeline -p ./projects/<书名> --pdf img
 ```
 
-产物：`output/normal/<书名>.img.unc.pdf`（未压缩）；压缩后 `<书名>.img.pdf`。封面无边距 + 内容页有边距。
+产物：`output/dist/<书名>.img.unc.pdf`（未压缩）；压缩后 `<书名>.img.pdf`。封面无边距 + 内容页有边距。
 
 > `cover_images` 在 document-factory 是"整页铺满无边距"（适合封面/插页）；内容页走正文文章（有 `page_margin` 边距）。
 
@@ -238,7 +238,7 @@ python main.py pdf -p ./projects/<书名> --type layed --pages 52 53   # 只渲�
 python main.py pipeline -p ./projects/<书名> --pdf layed
 ```
 
-产物：`output/normal/<书名>.layed.unc.pdf`（未压缩）；压缩后 `<书名>.layed.pdf`。封面 cover.jpg 整页铺满 + 内容页按坐标混排。
+产物：`output/dist/<书名>.layed.unc.pdf`（未压缩）；压缩后 `<书名>.layed.pdf`。封面 cover.jpg 整页铺满 + 内容页按坐标混排。
 
 **与其他流共用 document-factory 多文章 + 自动 TOC**：layed 走与 `text`/`img` 流**同一套**章节切分（`auto_chapters()`）和**同一套**自动目录生成机制——把每章做成一篇 markdown 文章交给 document-factory 渲染，document-factory 自动产出**全文一致的 TOC**（章节标题 + 页码来自 OCR 自动检测）。这意味着三种方式下：
 
@@ -365,7 +365,7 @@ python main.py pdf -p ./projects/影印本 --type img --no-pdf
 4. config 写入 `pdf.show_cover=false`（避免重复文字封面）、`pdf.numbered=false`（去掉标题编号）；
 5. 调用 document-factory 的 `pdf`，单篇文章 → 自动不生成目录。
 
-产物：`output/content/`（结构）+ `output/normal/<书名>.img.unc.pdf`（未压缩）。封面副本放在 `output/imgpdf_source/`（供 cover_images 相对引用）。
+产物：`output/content/`（结构）+ `output/dist/<书名>.img.unc.pdf`（未压缩）。封面副本放在 `output/imgpdf_source/`（供 cover_images 相对引用）。
 
 > 封面 vs 内容页边距：`cover_images` 是 document-factory 故意做成的整页铺满（无边距），适合封面/插页；内容页走正文文章则有 `@page` 边距（默认 1.5cm×2cm）+ 图片边距，适合正文页留白。
 

@@ -42,7 +42,7 @@ def make_pdf(project, config, input_dir=None, output=None, compress=None, **kwar
         project: Project 实例（ocr-book-to-md 的项目，路径下含 config.yaml + output/content）
         config: Config 实例（可为 None，此时标题等走 document_factory 自己读 config.yaml）
         input_dir: 内容输入目录。text 流默认 output/content/；img 流传 output/content_img/。
-        output: 输出 PDF 路径。text 流默认 output/normal/<书名>.unc.pdf；img 流传 <书名>.img.unc.pdf。
+        output: 输出 PDF 路径。text 流默认 output/dist/<书名>.unc.pdf；img 流传 <书名>.img.unc.pdf。
         compress: 是否压缩。None 跟随 config.pdf.compress；False 禁用。
         **kwargs: 透传给 create_pdf 的任意参数（如 watermark、show_date、numbered、
             publications、shuffle/sand 等），优先级高于 config。document-factory
@@ -76,7 +76,8 @@ def make_pdf(project, config, input_dir=None, output=None, compress=None, **kwar
     if input_dir:
         create_kwargs['input_dir'] = input_dir
     if output is None:
-        out_dir = project.output_dir / "normal"
+        sub = config.get('pdf.output_dir', 'dist') if config is not None else 'dist'
+        out_dir = project.output_dir / sub
         out_dir.mkdir(parents=True, exist_ok=True)
         output = str(out_dir / f"{project.path.name}.unc.pdf")
     create_kwargs['output_file'] = output

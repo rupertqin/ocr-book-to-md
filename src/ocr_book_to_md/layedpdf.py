@@ -13,7 +13,7 @@
 产物：
     output/content_layed/article_N.md     每章一篇文章
     output/imgpdf_source/cover.*          复制的封面（cover_images 引用）
-    output/normal/<书名>.layed.unc.pdf / .layed.pdf（未压缩/压缩）
+    output/dist/<书名>.layed.unc.pdf / .layed.pdf（未压缩/压缩）
 
 依赖：document-factory 通过 weasyprint 渲染（pip install -e <document-factory 目录>）。
 
@@ -274,29 +274,6 @@ def find_cover(project):
     return None
 
 
-def _margin_mm(margin_str):
-    """CSS margin 简写 → (top, right, bottom, left) mm。"""
-    def _v(s):
-        m = re.match(r"^\s*([0-9.]+)\s*(mm|cm|pt|in)?\s*$", str(s))
-        if not m:
-            return None
-        num = float(m.group(1))
-        u = m.group(2) or "mm"
-        return {"mm": num, "cm": num * 10, "pt": num * 25.4 / 72.0,
-                "in": num * 25.4}[u]
-    parts = str(margin_str).strip().split()
-    vals = [_v(p) for p in parts]
-    if any(v is None for v in vals) or not vals:
-        return (15.0, 20.0, 15.0, 20.0)
-    if len(vals) == 1:
-        return (vals[0], vals[0], vals[0], vals[0])
-    if len(vals) == 2:
-        return (vals[0], vals[1], vals[0], vals[1])
-    if len(vals) == 3:
-        return (vals[0], vals[1], vals[2], vals[1])
-    return (vals[0], vals[1], vals[2], vals[3])
-
-
 # =============================================================================
 # 多文章 + document-factory 流水线（layed 与 img 共用同一套 TOC 机制）
 # =============================================================================
@@ -515,29 +492,6 @@ def _restore_layed_pdf_config(project):
     return None
 
 
-def _rename_layed_outputs(project):
-    """把 document-factory 生成的默认名产物加 .layed 二级后缀。
-
-    与 img 流一致，保留 .layed 标识，不占用 text 流的 <书名>.pdf /
-    <书名>.unc.pdf：
-        <书名>.unc.pdf  → <书名>.layed.unc.pdf
-        <书名>.pdf      → <书名>.layed.pdf（compress 压缩版）
-    """
-    out_dir = project.output_dir / "normal"
-    from .config import Config
-    cfg = Config(str(project.path))
-    name = cfg.get_book_name() or project.path.name
-    for src, dst in [
-        (out_dir / f"{name}.unc.pdf", out_dir / f"{name}.layed.unc.pdf"),
-        (out_dir / f"{name}.pdf", out_dir / f"{name}.layed.pdf"),
-    ]:
-        if src.exists():
-            if dst.exists():
-                dst.unlink()
-            src.rename(dst)
-            print(f"  layed PDF: {dst.name}")
-
-
 def make_layedpdf(project, pages=None, output=None, base_font_pt=11.0,
                   font_family=None, justify=None, width_scale=None,
                   letter_spacing=None, punct_compress=None):
@@ -554,7 +508,7 @@ def make_layedpdf(project, pages=None, output=None, base_font_pt=11.0,
     Args:
         project: Project 实例
         pages: 仅渲染指定页（调试）
-        output: 输出 PDF 路径（None 用 <output/normal/<书名>.unc.pdf> 默认名）
+        output: 输出 PDF 路径（None 用 <output/dist/<书名>.layed.unc.pdf> 默认名）
         base_font_pt, font_family, justify, width_scale, letter_spacing,
         punct_compress: 同 build_layed_html 的同名参数，None 时读 config
     """
@@ -573,20 +527,22 @@ def make_layedpdf(project, pages=None, output=None, base_font_pt=11.0,
             punct_compress=punct_compress,
         )
 
-        # 默认输出路径：走 document-factory 默认名 <书名>.unc.pdf，随后重命名
-        out_dir = project.output_dir / "normal"
+        # 直接让 document-factory 生成到 <书名>.layed.unc.pdf（而非先生成 text 默认名再改名），
+        # 避免覆盖已存在的 text 模式 PDF。压缩由 pdf_mod.make_pdf 依据 config.pdf.compress 处理
+        # （compress_pdf 会把 <书名>.layed.unc.pdf 压成 <书名>.layed.pdf）。
+        from .config import Config as LocalCfg
+        cfg = LocalCfg(str(project.path))
+        out_sub = cfg.get('pdf.output_dir', 'dist')
+        out_dir = project.output_dir / out_sub
         os.makedirs(str(out_dir), exist_ok=True)
-        cfg = Config(str(project.path))
         name = cfg.get_book_name() or project.path.name
-        unc_output = str(out_dir / f"{name}.unc.pdf")
+        unc_output = str(out_dir / f"{name}.layed.unc.pdf")
         if output is not None:
             unc_output = output
 
         # 复用一个 cfg 实例（pdf_mod.make_pdf 走库调用，无 shell 副作用）
-        from .config import Config as LocalCfg
-        pdf_mod.make_pdf(project, LocalCfg(str(project.path)),
+        pdf_mod.make_pdf(project, cfg,
                          input_dir=str(article_dir), output=unc_output)
-        _rename_layed_outputs(project)
 
         print(f"layedpdf 生成完成：{article_count} 章"
               "（document-factory 自动 TOC 与 img/text 模式一致）")

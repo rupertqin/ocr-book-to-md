@@ -310,29 +310,6 @@ def prepare(project, img_dir, book_name=None):
     return cover_images, len(pages), page_margin_str
 
 
-def _rename_imgpdf_outputs(project):
-    """把 document-factory 生成的默认名产物加 .img 二级后缀。
-
-    document-factory 生成 <书名>.unc.pdf（未压缩），若 compress 还产出 <书名>.pdf。
-    img 流把两者重命名加 .img，避免占用 text 流的 <书名>.pdf / <书名>.unc.pdf：
-      <书名>.unc.pdf  → <书名>.img.unc.pdf
-      <书名>.pdf      → <书名>.img.pdf（compress 压缩版）
-    """
-    out_dir = project.output_dir / "normal"
-    from .config import Config
-    cfg = Config(str(project.path))
-    name = cfg.get_book_name() or project.path.name
-    for src, dst in [
-        (out_dir / f"{name}.unc.pdf", out_dir / f"{name}.img.unc.pdf"),
-        (out_dir / f"{name}.pdf", out_dir / f"{name}.img.pdf"),
-    ]:
-        if src.exists():
-            if dst.exists():
-                dst.unlink()
-            src.rename(dst)
-            print(f"  原图片 PDF: {dst.name}")
-
-
 def make_imgpdf(project, img_dir, book_name=None, no_pdf=False):
     """图片直转 PDF 完整流程：准备结构 → 调用 document-factory。
 
@@ -353,36 +330,18 @@ def make_imgpdf(project, img_dir, book_name=None, no_pdf=False):
     if no_pdf:
         print(f"（--no-pdf，跳过 PDF 生成；已准备 {n_pages} 页内容图）")
         return None
-    # 传入 Config 实例：pdf_mod.make_pdf 才能读到 config.pdf.compress（否则传 None
-    # 会跳过压缩，`pdf.compress: true` 不生效）。
-    pdf_mod.make_pdf(project, LocalCfg(str(project.path)),
-                     input_dir=str(project.get_content_img_dir()))
-    _rename_imgpdf_outputs(project)
+    # 直接让 document-factory 生成到 <书名>.img.unc.pdf（而非先生成 text 默认名再改名），
+    # 避免覆盖已存在的 text 模式 PDF。压缩由 pdf_mod.make_pdf 依据 config.pdf.compress 处理
+    # （compress_pdf 会把 <书名>.img.unc.pdf 压成 <书名>.img.pdf）。
+    cfg = LocalCfg(str(project.path))
+    out_sub = cfg.get('pdf.output_dir', 'dist')
+    out_dir = project.output_dir / out_sub
+    os.makedirs(str(out_dir), exist_ok=True)
+    name = cfg.get_book_name() or project.path.name
+    pdf_mod.make_pdf(project, cfg,
+                     input_dir=str(project.get_content_img_dir()),
+                     output=str(out_dir / f"{name}.img.unc.pdf"))
     return n_pages
-
-
-# 复用 layed 流的 CSS margin 简写解析器（保持两种流视觉边距算法一致）。
-def _margin_mm(margin_str):
-    """CSS margin 简写 → (top, right, bottom, left) mm。"""
-    def _v(s):
-        m = re.match(r"^\s*([0-9.]+)\s*(mm|cm|pt|in)?\s*$", str(s))
-        if not m:
-            return None
-        num = float(m.group(1))
-        u = m.group(2) or "mm"
-        return {"mm": num, "cm": num * 10, "pt": num * 25.4 / 72.0,
-                "in": num * 25.4}[u]
-    parts = str(margin_str).strip().split()
-    vals = [_v(p) for p in parts]
-    if any(v is None for v in vals) or not vals:
-        return (15.0, 20.0, 15.0, 20.0)
-    if len(vals) == 1:
-        return (vals[0], vals[0], vals[0], vals[0])
-    if len(vals) == 2:
-        return (vals[0], vals[1], vals[0], vals[1])
-    if len(vals) == 3:
-        return (vals[0], vals[1], vals[2], vals[1])
-    return (vals[0], vals[1], vals[2], vals[3])
 
 
 def _strip_image_meta(src_path, dst_path):
