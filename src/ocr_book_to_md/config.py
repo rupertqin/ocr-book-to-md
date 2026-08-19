@@ -183,10 +183,6 @@ class Config:
     def get_pdf_subtitle(self) -> Optional[str]:
         return self.get_phased('pdf', 'subtitle')
 
-    def get_document_factory(self) -> Optional[str]:
-        """document-factory 项目路径（main.py 所在目录），用于 pdf 流程。"""
-        return self.get('pdf.document_factory')
-
     def get_pdf_engine(self) -> str:
         return self.get_phased('pdf', 'engine', 'weasyprint')
 
@@ -220,7 +216,7 @@ book:
   images_dir: ""      # 截图目录（默认 data/images）
   start_page: null    # 起始页（默认自动探测）
   end_page: null      # 结束页（默认自动探测）
-  force_ocr: false    # 忽略 OCR 缓存，强制重跑
+  force_ocr: false    # 忽略 OCR 缓存，强制重跑（等价命令行 --force）
 
 # 布局检测参数
 detect:
@@ -231,11 +227,12 @@ detect:
 
 # 全部流程（pipeline）最终 PDF 方式
 pipeline:
-  pdf: text          # text(文字流) / img(原图片) / textOnImg(文字置于图)。命令行 --pdf 可覆盖
+  pdf: text          # text(文字流) / img(原图片) / layed(文字置于图)。命令行 --pdf 可覆盖
 
 # document-factory PDF 流程（把 output/content/ 交给它生成 PDF）
 pdf:
-  document_factory: ""   # document-factory 项目路径（main.py 所在目录）
+  # document_factory 以库方式调用（import），需先 pip install -e <document-factory 目录>。
+  # 不再需要在此配置路径。
   title: ""              # PDF 封面大标题（默认书名）
   subtitle: null
   statement: null        # 封面下方免责声明（多行用 \\n）

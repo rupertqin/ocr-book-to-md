@@ -5,24 +5,19 @@ book:
   end_page: null
   force_ocr: false
 pdf:
-  document_factory: ''
   title: 进化心理学
   subtitle: ''
   statement: null
   engine: weasyprint
   chunk_articles: null
-  page_margin: "1.5cm 2cm"
+  page_margin: 1cm 1.5cm
   jobs: 4
   mode: full
-  font_family: "Hiragino Sans GB"
+  font_family: Hiragino Sans GB
   punct_compress:
-  #   "": "0.4em"
-  #   "·“": "0.2em"
-    "、。，”（《【…": "-0.1em"
-  #   "—": "-0.3em"
-  #   "：）》】": "-0.5em"
-  #   "？！；": "-0.7em"
+    、。，”（《【…: -0.1em
   cover_images:
-  - data/images/cover.jpg
+  - output/imgpdf_source/cover.jpg
   show_cover: false
   numbered: false
+  compress: true

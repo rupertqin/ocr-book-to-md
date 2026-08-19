@@ -128,27 +128,96 @@ def auto_page_range(pages):
     return (min(pages), max(pages)) if pages else None
 
 
-def prepare_images(images_dir, pages, out):
+def _is_blank_image(im, uniform_ratio=0.999):
+    """判定图片是否"完全空白、无实质信息"。
+
+    把图像转灰度，统计出现最多的灰度值的占比：若 ≥uniform_ratio（默认 99.9%）
+    是同一个颜色，说明该图基本是纯色（全白/全黑/纯色），没有任何文字/图片内容。
+    典型场景：源图里夹的"透明白图"——按白底合成后是整页纯白，会被判定为空白并过滤。
+
+    Args:
+        im: PIL Image
+        uniform_ratio: 主色占比阈值，超过即视为空白
+    Returns:
+        True 表示空白（应过滤）
+    """
+    try:
+        import numpy as np
+        g = np.asarray(im.convert("L")).astype(np.int64)
+        if g.size == 0:
+            return True
+        hist = np.bincount(g.ravel(), minlength=256)
+        dominant = float(hist.max()) / g.size
+        return dominant >= uniform_ratio
+    except Exception:
+        return False
+
+
+BLANK_PAGES_FILE = "blank_pages.txt"
+
+
+def blank_pages_path(out):
+    """空白页记录文件路径（<out>/blank_pages.txt）。"""
+    return os.path.join(out, BLANK_PAGES_FILE)
+
+
+def read_blank_pages(out):
+    """读取空白页记录（页号列表）。文件不存在或为空返回 []。"""
+    p = blank_pages_path(out)
+    if not os.path.isfile(p):
+        return []
+    try:
+        with open(p, encoding="utf-8") as f:
+            return sorted({int(x) for x in f.read().split() if x.strip()})
+    except Exception:
+        return []
+
+
+def write_blank_pages(out, page_nums):
+    """把空白页号写入记录文件（覆盖），供 PDF 各流最终制作时统一过滤。"""
+    p = blank_pages_path(out)
+    os.makedirs(out, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(" ".join(str(x) for x in sorted(set(page_nums))))
+
+
+def prepare_images(images_dir, pages, out, force=False):
     """把输入图片统一归一化为 JPEG，输出到 <out>/_ocr_tmp/。
     返回临时图片目录。完全沿用 run.py 的 prepare_images。
+
+    自动过滤"完全空白"的图片（如透明白图）：不产出对应的 p{n}.jpg，
+    并把空白页号写入 <out>/blank_pages.txt 持久化——最终做 PDF 的各流
+    （img/layed/text）读取该记录统一过滤，保证原图目录 / _ocr_tmp 都不含空白页。
+
+    Args:
+        force: True 时绕过 mtime 缓存，重新处理所有页（配合 --force 全步骤无缓存）
     """
     tmp = os.path.join(out, "_ocr_tmp")
     os.makedirs(tmp, exist_ok=True)
     from PIL import Image
-    converted = copied = 0
+    converted = copied = blank = 0
+    blank_pages = []
     for n, fname in sorted(pages.items()):
         src = os.path.join(images_dir, fname)
         dst = os.path.join(tmp, f"p{n}.jpg")
         if not os.path.isfile(src):
             continue
-        if os.path.isfile(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+        # 先判空白（放在 mtime 缓存判断之前），保证重跑时也能清掉历史残留的空白页
+        im = Image.open(src)
+        if _is_blank_image(im):
+            # 完全空白（纯色、无信息）→ 过滤：删掉历史 p{n}.jpg，不产出，OCR/detect 自动跳过
+            if os.path.isfile(dst):
+                os.remove(dst)
+            blank += 1
+            blank_pages.append(n)
             continue
-        fmt = Image.open(src).format
+        if not force and os.path.isfile(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
+            continue
+        fmt = im.format
         if fmt == "JPEG":
             shutil.copyfile(src, dst)
             copied += 1
             continue
-        im = Image.open(src)
         if im.mode == "RGBA":
             bg = Image.new("RGB", im.size, (255, 255, 255, 255))
             bg.paste(im, mask=im.split()[3])
@@ -157,7 +226,11 @@ def prepare_images(images_dir, pages, out):
             im = im.convert("RGB")
         im.save(dst, "JPEG", quality=95)
         converted += 1
-    print(f"图片预处理完成：{copied} 张 JPEG 直接复制 + {converted} 张转 JPEG（临时目录 {tmp}）")
+    if blank:
+        print(f"  已过滤 {blank} 张完全空白图片（无信息）：{blank_pages}")
+    write_blank_pages(out, blank_pages)
+    print(f"图片预处理完成：{copied} 张 JPEG 直接复制 + {converted} 张转 JPEG"
+          f" + {blank} 张空白过滤（临时目录 {tmp}）")
     return tmp
 
 
@@ -190,7 +263,7 @@ def run(project, images_dir, start=None, end=None, force_ocr=False):
     end = end if end is not None else rng[1]
     print(f"检测到 {len(pages)} 页，OCR 范围 p{start}..p{end}")
 
-    img_for_ocr = prepare_images(images_dir, pages, out)
+    img_for_ocr = prepare_images(images_dir, pages, out, force=force_ocr)
 
     if os.path.isdir(os.path.join(ocr_cache, "pages_json")) and not force_ocr:
         print("复用 OCR 缓存:", ocr_cache)

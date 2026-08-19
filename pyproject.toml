@@ -11,6 +11,7 @@ dependencies = [
     "Pillow",
     "numpy",
     "pyyaml",
+    "document-factory",   # 库方式调用，需先安装（本地：pip install -e /Volumes/T9/code/document-factory）
 ]
 
 [project.optional-dependencies]

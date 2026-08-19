@@ -1,19 +1,24 @@
 # -*- coding: utf-8 -*-
-"""第三种 PDF：按原书坐标绝对定位的文字 + 图片混排。
+"""第三种 PDF：按原书坐标绝对定位的文字 + 图片混排（layed）。
 
-思路：OCR 已提供每行文字的精确坐标（归一化 x/y/w/h），detect 已提供每张裁图在
-原书页面的区域（像素 x0/y_top/x1/y_bottom）。把每个原书页作为一张 A4 画布，
-用 HTML `position: absolute` 把文字行与裁图按原书坐标铺回去，实现接近原书的混排。
+设计（与 img 流共用 document-factory 多文章 + 自动 TOC 机制）：
+- 切分多篇文章（每章一篇），与 img 流一致（走 auto_chapters）。
+- 每篇文章正文为：每页一个 `<section class="layed-page">`，内含按 OCR 坐标
+  绝对定位的文字行 + 裁图。section 大小 = A4 内容区（210 - 2*lr, 297 - 2*tb）。
+- 与 img 流一致直接复用 config.pdf.page_margin 给 document-factory @page：视觉
+  边距 = @page margin（标准边距），section 大小正好匹配 @page 内容区。无须再
+  在 section 内手算 offset；section 内坐标直接以 section 左上角为 0。
+- 封面：与 img 流共用 cover_images 机制（@page cover-image { margin: 0 }）。
 
-坐标基准：
-- 文字：ocr/pages_json/<n>.json 的 lines，归一化坐标 × 源图尺寸 = 像素
-- 图片：blocks/<n>.json 的 image block（x0/y_top/x1/y_bottom，像素）
-- 源图统一尺寸：1166 × 2342 px（若不同则以实际为准）
+产物：
+    output/content_layed/article_N.md     每章一篇文章
+    output/imgpdf_source/cover.*          复制的封面（cover_images 引用）
+    output/normal/<书名>.layed.unc.pdf / .layed.pdf（未压缩/压缩）
 
-渲染：weasyprint，@page 默认 A4 + 可配 page_margin；页面内容区按比例映射原书页。
+依赖：document-factory 通过 weasyprint 渲染（pip install -e <document-factory 目录>）。
 
 用法：
-    python main.py layedpdf -p <project>
+    python main.py pdf -p <project> -t layed
 """
 
 import html as html_mod
@@ -269,103 +274,6 @@ def find_cover(project):
     return None
 
 
-def build_layed_html(project, pages=None, base_font_pt=11.0,
-                     page_margin_str=None, font_family=None, justify=None,
-                     width_scale=None, letter_spacing=None, punct_compress=None):
-    """生成整本 layed 排版 HTML（每原书页一个 @page/div）。
-
-    font_family: 字体族，None 时读 config.pdf.font_family（如 'PingFang SC'、'Noto Sans CJK SC'）。
-    justify: 是否两端对齐，None 时读 config.pdf.justify（默认 True）。
-    width_scale: 文字容器宽度系数（OCR 宽 × scale，<1 让容器略窄、避免宽字体标点溢出），None 读 config。
-    letter_spacing: CSS letter-spacing（如 '-0.02em'），None 读 config。
-    punct_compress: 标点压缩 CSS 值（如 '-0.1em'），None 读 config.pdf.punct_compress。
-
-    Returns:
-        (html, n_pages, n_figs)
-    """
-    page_nums = _collect_pages(project, pages)
-    if not page_nums:
-        raise SystemExit("错误：未找到任何页面数据（blocks 或 ocr）")
-
-    # 页面与边距
-    from .config import Config
-    cfg = Config(str(project.path))
-    if page_margin_str is None:
-        page_margin_str = cfg.get('pdf.page_margin', '1.5cm 2cm')
-    if font_family is None:
-        font_family = cfg.get('pdf.font_family', None)
-    if justify is None:
-        justify = bool(cfg.get('pdf.justify', True))
-    if width_scale is None:
-        width_scale = float(cfg.get('pdf.width_scale', 1.0))
-    if letter_spacing is None:
-        letter_spacing = cfg.get('pdf.letter_spacing', None)
-    if punct_compress is None:
-        punct_compress = cfg.get('pdf.punct_compress', None)
-    # 解析 margin（top right bottom left, mm）
-    top_mm, right_mm, bottom_mm, left_mm = _margin_mm(page_margin_str)
-    page_w_mm = 210.0
-    page_h_mm = 297.0
-    width_mm = page_w_mm - left_mm - right_mm
-    height_mm = page_h_mm - top_mm - bottom_mm
-
-    # 封面（cover.jpg）作为第一页，整页铺满无边距
-    page_htmls = []
-    cover_path = find_cover(project)
-    if cover_path and not pages:
-        cover_html = ('<img src="file://' + str(Path(cover_path).resolve()) + '" '
-                      f'style="position:absolute;left:0;top:0;width:{page_w_mm}mm;'
-                      f'height:{page_h_mm}mm;object-fit:cover;">')
-        page_htmls.append(f'<section class="page cover">{cover_html}</section>')
-
-    # 每页源图尺寸（假设统一；逐页探测）
-    total_figs = 0
-
-    for n in page_nums:
-        W, H = _page_img_size(project, n)
-        # 统一 scale（contain）：等比缩放填满内容区的一边，另一边居中留白。
-        # 文字与图片同基准，不变形、不重叠。留白是原书比例(0.498)≠A4比例(0.637)的必然结果。
-        scale = min(width_mm / W, height_mm / H)
-        x_off = left_mm + (width_mm - W * scale) / 2
-        y_off = top_mm + (height_mm - H * scale) / 2
-        seg, nf = render_page_html(project, n, W, H, scale, base_font_pt,
-                                   x_off, y_off, font_family=font_family,
-                                   justify=justify, width_scale=width_scale,
-                                   letter_spacing=letter_spacing,
-                                   punct_compress=punct_compress)
-        total_figs += nf
-        page_htmls.append(f'<section class="page">{seg}</section>')
-
-    n_total = len(page_htmls)
-    pages_css = "\n".join(
-        f'.page:nth-child({i+1}) {{ width:{page_w_mm}mm; height:{page_h_mm}mm; '
-        f'position:relative; overflow:hidden; page-break-after:always; }}'
-        for i in range(n_total)
-    )
-
-    body_family = f"font-family:{font_family};" if font_family else ""
-    # 标点压缩 CSS：按分组生成 .punct / .punct-a ... 的 letter-spacing
-    punct_css = ""
-    for _chars, val, suffix in _parse_punct_groups(punct_compress):
-        punct_css += f".page .punct{suffix} {{ letter-spacing:{val}; }}\n"
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-  @page {{ size: A4; margin: 0; }}
-  body {{ margin: 0; padding: 0; {body_family} }}
-  .page {{ position: relative; overflow: hidden; }}
-  .page img {{ position: absolute; }}
-  .page p {{ position: absolute; }}
-  .page.cover img {{ object-fit: cover; }}
-  {punct_css}
-  {pages_css}
-</style>
-</head><body>
-{chr(10).join(page_htmls)}
-</body></html>"""
-    return html, n_total, total_figs
-
-
 def _margin_mm(margin_str):
     """CSS margin 简写 → (top, right, bottom, left) mm。"""
     def _v(s):
@@ -389,72 +297,300 @@ def _margin_mm(margin_str):
     return (vals[0], vals[1], vals[2], vals[3])
 
 
+# =============================================================================
+# 多文章 + document-factory 流水线（layed 与 img 共用同一套 TOC 机制）
+# =============================================================================
+
+
+def prepare_layed_articles(project, pages=None, base_font_pt=11.0,
+                            page_margin_str=None, font_family=None,
+                            justify=None, width_scale=None,
+                            letter_spacing=None, punct_compress=None):
+    """为 layed 生成多篇文章 Markdown：每章一篇，绝对定位 HTML。
+
+    与 img 流共用 ``auto_chapters()`` 的章节切分。每篇文章的第一行
+    ``# {chapter_title}`` 由 document-factory 提取为 art['title']（用于 TOC）。
+    ``<style>`` 块定义 .layed-page 的尺寸（210×297mm）与断页规则；每个原书页
+    一个 ``<section class="layed-page">``，里面是 OCR 文字行 + 裁图的绝对定位。
+
+    Args:
+        pages: 仅渲染指定页（调试），None 用全部页。
+        其他参数同 make_layedpdf（来自 config 或显式传入）。
+
+    Returns:
+        (article_count, article_dir)
+        article_count: 写入的文章数（0 时仍写文件以便 document-factory 不报错）
+        article_dir: 文档工厂会读这个目录
+    """
+    from .config import Config
+    from .build_md import auto_chapters
+
+    cfg = Config(str(project.path))
+
+    if page_margin_str is None:
+        page_margin_str = cfg.get('pdf.page_margin', '1.5cm 2cm')
+    if font_family is None:
+        font_family = cfg.get('pdf.font_family', None)
+    if justify is None:
+        justify = bool(cfg.get('pdf.justify', True))
+    if width_scale is None:
+        width_scale = float(cfg.get('pdf.width_scale', 1.0))
+    if letter_spacing is None:
+        letter_spacing = cfg.get('pdf.letter_spacing', None)
+    if punct_compress is None:
+        punct_compress = cfg.get('pdf.punct_compress', None)
+
+    # section 大小 = A4 内容区（A4 减去 @page margin）；视觉边距由 document-factory
+    # @page margin 直接提供（与 img 流完全一致），section 内坐标以左上角为 0。
+    # 用 document-factory 的 effective_page_margin_mm：底部已 clamp 到至少
+    # PAGE_NUM_MIN_BOTTOM_MM，与 @page 实际内容区一致，保证 .layed-page 高度匹配。
+    from document_factory.pdf_generator import effective_page_margin_mm
+    top_mm, right_mm, bottom_mm, left_mm = effective_page_margin_mm(page_margin_str)
+    page_w_mm = 210.0
+    page_h_mm = 297.0
+    width_mm = page_w_mm - left_mm - right_mm
+    height_mm = page_h_mm - top_mm - bottom_mm
+
+    page_nums_all = _collect_pages(project)
+    if not page_nums_all:
+        raise SystemExit("错误：未找到任何页面数据（blocks 或 ocr）")
+
+    # 统一过滤完全空白页：读 <out>/blank_pages.txt（OCR 预处理已写），避免空白页入 PDF
+    from .ocr import read_blank_pages
+    _blank = set(read_blank_pages(str(project.output_dir)))
+    if _blank:
+        page_nums_all = [n for n in page_nums_all if n not in _blank]
+        print(f"  layed 已过滤 {len(_blank)} 张完全空白页：{sorted(_blank)}")
+    if not page_nums_all:
+        raise SystemExit("错误：过滤空白页后无剩余页面")
+
+    # 调试 --pages 时只渲染指定页
+    if pages:
+        page_nums = sorted(set(pages) & set(page_nums_all))
+    else:
+        page_nums = page_nums_all
+
+    # 章节切分
+    try:
+        chapters = auto_chapters(str(project.get_blocks_dir()))
+    except SystemExit:
+        chapters = None
+
+    # 准备 article 目录（独立于 text 流的 content/ 和 img 流的 content_img/）
+    article_dir = project.output_dir / "content_layed"
+    if article_dir.exists():
+        # 清旧 .md（保留 images 等子目录以便调试）
+        for f in os.listdir(str(article_dir)):
+            p = os.path.join(str(article_dir), f)
+            if os.path.isfile(p) and f.endswith(".md"):
+                os.remove(p)
+    os.makedirs(str(article_dir), exist_ok=True)
+
+    # 注入每篇文章的 CSS（点睛 .layed-page 尺寸 + 标点压缩分组）
+    body_family = f"font-family:{font_family};" if font_family else ""
+    ls_css = f"letter-spacing:{letter_spacing};" if letter_spacing else ""
+    css_lines = [
+        '<style>',
+        # 隐藏 document-factory 自动注入的 `<h1 id="article-N">`：
+        # 不清掉 H1 时会与第一个 .layed-page 出现在同一页 → 强制换页 → 单独占页。
+        # 清成 0 视觉占位但保留 anchor id（避免 display:none 让 weasyprint 丢链接注释）。
+        '.article h1 { position: absolute !important; top: 0 !important; '
+        'left: 0 !important; width: 0 !important; height: 0 !important; '
+        'margin: 0 !important; padding: 0 !important; font-size: 0 !important; '
+        'line-height: 0 !important; color: transparent !important; '
+        'overflow: hidden !important; visibility: hidden !important; }',
+        # section 大小 = A4 内容区（210-2*lr, 297-2*tb）；与 document-factory @page
+        # 边距一致，section 内坐标以 (0,0) 为原点。视觉边距直接由 @page 提供（与 img 流一致），
+        # TOC 与底部页码也用 @page 标准位置 → 与 img 流目录样式 / 页码位置完全一致。
+        f'.layed-page {{ position: relative; width: {width_mm}mm; '
+        f'height: {height_mm}mm; overflow: hidden; break-after: page; '
+        f'page-break-after: always; }}',
+        '.layed-page:last-of-type { break-after: auto; page-break-after: auto; }',
+        '.layed-page img { position: absolute; }',
+        f'.layed-page p {{ position: absolute; margin: 0; padding: 0; '
+        f'line-height: 1.0; white-space: nowrap; '
+        f'{body_family} {ls_css} }}',
+    ]
+    for chars, val, suffix in _parse_punct_groups(punct_compress):
+        css_lines.append(
+            f'.layed-page .punct{suffix} {{ letter-spacing:{val}; }}')
+    css_lines.append('</style>')
+    css_block = '\n'.join(css_lines)
+
+    # 缓存每页源图尺寸
+    page_size_cache = {}
+
+    def get_page_size(n):
+        if n not in page_size_cache:
+            page_size_cache[n] = _page_img_size(project, n)
+        return page_size_cache[n]
+
+    def render_chapter_pages(chapter_pages):
+        sections = []
+        for n in chapter_pages:
+            W, H = get_page_size(n)
+            # content-area 内坐标，section 自身以 (0,0) 为原点；@page margin 已在
+            # 外层提供 inset（与 img 流完全一致）。
+            scale = min(width_mm / W, height_mm / H)
+            x_off = (width_mm - W * scale) / 2
+            y_off = (height_mm - H * scale) / 2
+            seg, _nf = render_page_html(
+                project, n, W, H, scale, base_font_pt, x_off, y_off,
+                font_family=font_family, justify=justify,
+                width_scale=width_scale, letter_spacing=letter_spacing,
+                punct_compress=punct_compress,
+            )
+            sections.append(f'<section class="layed-page">{seg}</section>')
+        return sections
+
+    article_count = 0
+
+    if chapters:
+        for kind, slug, fname, title, start, end in chapters:
+            if kind == 'front':
+                continue  # 前言/版权独立成 section，已被 cover_images 处理
+            chapter_pages = [n for n in page_nums if start <= n <= end]
+            if not chapter_pages:
+                continue
+            lines = [f"# {title}", "", css_block, ""]
+            lines.extend(render_chapter_pages(chapter_pages))
+            with open(os.path.join(str(article_dir), f"article_{article_count}.md"),
+                       "w", encoding="utf-8") as fp:
+                fp.write("\n".join(lines) + "\n")
+            article_count += 1
+    else:
+        # 无章节：单篇（整书一页一段）
+        lines = ["#", "", css_block, ""]
+        lines.extend(render_chapter_pages(page_nums))
+        with open(os.path.join(str(article_dir), "article_0.md"),
+                  "w", encoding="utf-8") as fp:
+            fp.write("\n".join(lines) + "\n")
+        article_count = 1
+
+    print(f"  layed 准备完成：{article_count} 章 + 共享 CSS → {article_dir}")
+    return article_count, article_dir
+
+
+def _setup_layed_pdf_config(project):
+    """为 layed 配置 document-factory 所需的 pdf.* 设置。
+
+    与 img 流共用 document-factory 配置约定，仅差异是 `.layed-page` 内容由
+    layed 准备，document-factory 的 @page 直接用用户的 `pdf.page_margin`
+    （如 "1.5cm 2cm"）→ 视觉边距、TOC 样式、底部页码位置与 img 流完全一致。
+
+    - pdf.cover_images：与 img 流共用 cover_images 机制（@page cover-image 边距 = 0）
+    - pdf.show_cover = False（封面用 cover_images，不渲染文字封面）
+    - pdf.numbered = False（章节名是完整标题，不需要 document-factory 再加 "1." 前缀）
+
+    Returns:
+        cover_images：用于调试打印
+    """
+    from .config import Config
+    cfg = Config(str(project.path))
+
+    # 封面（cover_images）—— 与 imgpdf.prepare 行为一致
+    cover_path = find_cover(project)
+    cover_images = []
+    if cover_path:
+        src_dir = project.output_dir / "imgpdf_source"
+        os.makedirs(str(src_dir), exist_ok=True)
+        cover_name = Path(cover_path).name
+        target = src_dir / cover_name
+        if not target.exists():
+            try:
+                shutil.copy2(cover_path, target)
+            except OSError as e:
+                print(f"  ⚠ 复制封面到 {target} 失败：{e}")
+        cover_images = [f"output/imgpdf_source/{cover_name}"]
+    cfg.set('pdf.cover_images', cover_images)
+    cfg.set('pdf.show_cover', False)
+    cfg.set('pdf.numbered', False)
+
+    return cover_images
+
+
+def _restore_layed_pdf_config(project):
+    """layed 不再临时覆盖 pdf.page_margin，无须恢复。其他字段
+    （cover_images 等）保留为 layed 视角下的项目配置（与 imgpdf 行为一致）。"""
+    return None
+
+
+def _rename_layed_outputs(project):
+    """把 document-factory 生成的默认名产物加 .layed 二级后缀。
+
+    与 img 流一致，保留 .layed 标识，不占用 text 流的 <书名>.pdf /
+    <书名>.unc.pdf：
+        <书名>.unc.pdf  → <书名>.layed.unc.pdf
+        <书名>.pdf      → <书名>.layed.pdf（compress 压缩版）
+    """
+    out_dir = project.output_dir / "normal"
+    from .config import Config
+    cfg = Config(str(project.path))
+    name = cfg.get_book_name() or project.path.name
+    for src, dst in [
+        (out_dir / f"{name}.unc.pdf", out_dir / f"{name}.layed.unc.pdf"),
+        (out_dir / f"{name}.pdf", out_dir / f"{name}.layed.pdf"),
+    ]:
+        if src.exists():
+            if dst.exists():
+                dst.unlink()
+            src.rename(dst)
+            print(f"  layed PDF: {dst.name}")
+
+
 def make_layedpdf(project, pages=None, output=None, base_font_pt=11.0,
                   font_family=None, justify=None, width_scale=None,
                   letter_spacing=None, punct_compress=None):
-    """生成 layed 排版 PDF（textOnImg 流）。
+    """生成 layed PDF：document-factory 多文章 + 自动 TOC。
+
+    流程：
+        ① 配置 pdf.* 让 document-factory 把每个章节当一篇，自动生成 TOC；
+           直接复用用户 config.pdf.page_margin（不强制覆盖为 '0'），让 document-factory
+           的 @page、TOC、底部页码全部走标准边距，与 img 流完全一致。
+        ② 按章节切分多篇文章，每篇内每原书页一个绝对定位 section。
+        ③ 调 document-factory.create_pdf 渲染（content_layed/）。
+        ④ 重命名加 .layed 后缀；页面压缩走 document-factory 默认（pdf.compress）。
 
     Args:
         project: Project 实例
         pages: 仅渲染指定页（调试）
-        output: 输出路径（默认 output/normal/<书名>.textOnImg.unc.pdf）
-        base_font_pt: 正文基准字号(pt)
-        font_family: 字体族（None 读 config.pdf.font_family）
-        justify: 是否两端对齐（None 读 config.pdf.justify）
-        width_scale: 文字容器宽度系数（<1 适配宽字体标点溢出，None 读 config）
-        letter_spacing: CSS letter-spacing（如 '-0.02em'，None 读 config）
-        punct_compress: 标点压缩 CSS 值（如 '-0.1em'，None 读 config）
+        output: 输出 PDF 路径（None 用 <output/normal/<书名>.unc.pdf> 默认名）
+        base_font_pt, font_family, justify, width_scale, letter_spacing,
+        punct_compress: 同 build_layed_html 的同名参数，None 时读 config
     """
-    html, n_pages, n_figs = build_layed_html(project, pages, base_font_pt,
-                                             font_family=font_family,
-                                             justify=justify,
-                                             width_scale=width_scale,
-                                             letter_spacing=letter_spacing,
-                                             punct_compress=punct_compress)
-    if output is None:
+    from . import pdf as pdf_mod
+    from .config import Config
+
+    cover_images = _setup_layed_pdf_config(project)
+    if cover_images:
+        print(f"  封面走 cover_images（@page cover-image 边距 = 0）：{cover_images}")
+
+    try:
+        article_count, article_dir = prepare_layed_articles(
+            project, pages=pages, base_font_pt=base_font_pt,
+            font_family=font_family, justify=justify,
+            width_scale=width_scale, letter_spacing=letter_spacing,
+            punct_compress=punct_compress,
+        )
+
+        # 默认输出路径：走 document-factory 默认名 <书名>.unc.pdf，随后重命名
         out_dir = project.output_dir / "normal"
-        os.makedirs(out_dir, exist_ok=True)
-        from .config import Config
+        os.makedirs(str(out_dir), exist_ok=True)
         cfg = Config(str(project.path))
         name = cfg.get_book_name() or project.path.name
-        # <书名>.textOnImg.unc.pdf：.textOnImg=方式二级后缀，.unc=压缩标记（未压缩）
-        output = str(out_dir / f"{name}.textOnImg.unc.pdf")
+        unc_output = str(out_dir / f"{name}.unc.pdf")
+        if output is not None:
+            unc_output = output
 
-    try:
-        from weasyprint import HTML
-    except ImportError:
-        raise SystemExit("错误：需要 weasyprint，请 pip install weasyprint")
+        # 复用一个 cfg 实例（pdf_mod.make_pdf 走库调用，无 shell 副作用）
+        from .config import Config as LocalCfg
+        pdf_mod.make_pdf(project, LocalCfg(str(project.path)),
+                         input_dir=str(article_dir), output=unc_output)
+        _rename_layed_outputs(project)
 
-    HTML(string=html, base_url=str(project.path)).write_pdf(output)
-    print(f"layedpdf 生成完成：{n_pages} 页，{n_figs} 张图 → {output}")
+        print(f"layedpdf 生成完成：{article_count} 章"
+              "（document-factory 自动 TOC 与 img/text 模式一致）")
+    finally:
+        _restore_layed_pdf_config(project)
 
-    # 若 config pdf.compress=true，调用 document-factory 压缩 <书名>.textOnImg.pdf
-    _compress_if_needed(project, output)
-    return output
-
-
-def _compress_if_needed(project, output):
-    """若 config pdf.compress=true，调用 document-factory 的 compress_pdf 压缩产物。
-
-    compress_pdf 对以 .unc 结尾的文件输出去掉 .unc 的 .pdf：
-    <书名>.textOnImg.unc.pdf → <书名>.textOnImg.pdf。
-    通过把 document-factory 的 src 加入 sys.path，正常包导入以支持相对导入。
-    """
-    from .config import Config
-    if not Config(str(project.path)).get('pdf.compress', False):
-        return
-    from . import pdf as pdf_mod
-    df_dir = pdf_mod._find_document_factory(None)
-    import sys as _sys
-    src_dir = df_dir / "src"
-    if str(src_dir) not in _sys.path:
-        _sys.path.insert(0, str(src_dir))
-    cfg = Config(str(project.path))
-    resolution = int(cfg.get('compress.resolution', 100))
-    try:
-        from document_factory.pdf_generator import compress_pdf
-        compress_pdf(output, resolution=resolution)
-        out_name = Path(output).name.replace(".unc.pdf", ".pdf")
-        print(f"  textOnImg 压缩完成 → {out_name}")
-    except Exception as e:
-        print(f"  ⚠ textOnImg 压缩失败: {e}")
+    return output or str(out_dir / f"{name}.layed.unc.pdf")
