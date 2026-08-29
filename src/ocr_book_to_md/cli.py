@@ -180,6 +180,9 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         if not images:
             images = config.get_images_dir() or str(project.images_dir)
         # 优先用 OCR 预处理后的 JPEG 目录（统一 pN.jpg，规避 PNG SIGBUS）
+        # OCR 中间件（per-project）：清理 pages_json 后，detect 才产干净 blocks
+        from .middleware import run_ocr_middleware
+        run_ocr_middleware(project)
         pre_tmp = project.output_dir / "_ocr_tmp"
         if pre_tmp.is_dir():
             images = str(pre_tmp)
@@ -267,6 +270,9 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         print("=" * 40)
         print("② 布局分析")
         print("=" * 40)
+        # OCR 中间件（per-project）：清理 pages_json 后，detect 才产干净 blocks
+        from .middleware import run_ocr_middleware
+        run_ocr_middleware(project)
         detect_mod.detect(project, img_for_ocr)
 
         if args.no_pdf:

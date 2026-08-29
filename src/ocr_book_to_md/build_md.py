@@ -35,12 +35,102 @@ def slugify(t):
     return t
 
 
+def _long_image_title(blocks_dir, first_page):
+    """取长图文章标题：按图片上的**视觉阅读顺序**拼接第一片顶部的标题块。
+
+    图片上的标题顺序是固定的（同一内容不管怎么切分/多宽都一样），OCR 只是把它
+    拆成一行或多块。这里不用 OCR 的块顺序，而按块的**视觉位置**排序：先按
+    y_top（行）、同一行内按 x0（从左到右），取第一组相邻标题行（文章主标题），
+    拼接为标题。这样结果只依赖图片排版，与 OCR 如何拆行无关——两张不同宽度同
+    内容截图会得到一致的标题。若无 heading 则返回空串。
+    """
+    data = _load_blocks(blocks_dir, first_page)
+    if not data:
+        return ""
+    heads = [b for b in data if b.get("type") == "heading"]
+    if not heads:
+        return ""
+    # 时间格式（如"11:53 ③"）是时间戳/元信息，不是文章标题，通用地过滤掉
+    heads = [b for b in heads
+             if not re.match(r"^\s*\d{1,2}:\d{2}", b.get("text", "").strip())]
+    if not heads:
+        return ""
+    # 取第一组相邻标题行（文章主标题），忽略后续图表标题等
+    heads.sort(key=lambda b: b.get("y_top", 0))
+    group = [heads[0]]
+    for b in heads[1:]:
+        if b["y_top"] - group[0]["y_bottom"] < 130:
+            group.append(b)
+        else:
+            break
+    # 组内按**视觉位置**输出：同行(y_top 相近)按 x0 从左到右，行间按 y 从上到下。
+    # 这样标题顺序只依赖图片排版，与 OCR 把标题拆成几行/几块无关。
+    row_tol = max((b.get("y_bottom", 0) - b.get("y_top", 0) for b in group), default=20) * 0.6
+    rows = []
+    for b in group:
+        placed = False
+        for r in rows:
+            if abs(b["y_top"] - r["y_top"]) <= row_tol:
+                r["items"].append(b)
+                placed = True
+                break
+        if not placed:
+            rows.append({"y_top": b["y_top"], "items": [b]})
+    rows.sort(key=lambda r: r["y_top"])
+    out = []
+    for r in rows:
+        r["items"].sort(key=lambda b: b.get("x0", 0))
+        out.append("".join(b.get("text", "").strip() for b in r["items"]))
+    return "".join(out)
+
+
 def auto_chapters(blocks_dir):
-    """从每页 blocks 的 heading 自动推导章节边界。"""
+    """从每页 blocks 的 heading 自动推导章节边界。
+
+    长图（滚动长截图）被切成多片后，本质是同一张图、没有真实章节标题——此时按
+    heading 切分只会把"图表标题"误当章节标题。每张长图独立成一个章节（无标题），
+    不与其他内容混合；多张长图各占一章。
+    """
     files = sorted([f for f in os.listdir(blocks_dir) if f.endswith(".json")],
                    key=lambda f: int(f[:-5]))
     pages = [int(f[:-5]) for f in files]
     minp, maxp = pages[0], pages[-1]
+
+    # 长图切分页标记：ocr.prepare_images 写入 {源文件名: [页号,...]}，每张长图独立成章
+    out_dir = os.path.dirname(os.path.abspath(blocks_dir))
+    lip_file = os.path.join(out_dir, "long_image_pages.txt")
+    lip_groups = []
+    if os.path.isfile(lip_file):
+        try:
+            with open(lip_file, encoding="utf-8") as f:
+                for line in f:
+                    line = line.rstrip("\n")
+                    if "\t" in line:
+                        name, nums = line.split("\t", 1)
+                        ps = [int(x) for x in nums.replace(",", " ").split() if x.strip()]
+                        if ps:
+                            lip_groups.append((name, sorted(set(ps))))
+                    else:
+                        ps = [int(x) for x in line.split() if x.strip()]
+                        if ps:
+                            lip_groups.append((line, sorted(set(ps))))
+        except Exception:
+            lip_groups = []
+
+    # 每张长图：占全部页 → 各自独立一章。文章标题取长图第一片顶部检测到的粗体标题
+    # （detect 已把"（8.24~8.30）"/"8月周总结第3期"等粗体行判为 heading）。
+    long_image_pages = set()
+    for _name, _ps in lip_groups:
+        long_image_pages.update(_ps)
+    if long_image_pages and set(pages) <= long_image_pages:
+        arts = []
+        for i, (_name, _ps) in enumerate(lip_groups):
+            title = _long_image_title(blocks_dir, min(_ps))
+            arts.append(("custom", "", f"article_{i}.md", title, min(_ps), max(_ps)))
+        # 若多张长图之间页码有缝隙（非连续的 blocks），把空白页范围也收进最近章
+        arts.sort(key=lambda a: a[4])
+        print(f"  (整本书是 {len(lip_groups)} 张长图切分，各自独立成章)")
+        return arts
     anchors = []
     # 记录每一页首个 heading（任意格式），用于"找不到第X章"时回退到"每章一节"
     first_heading_per_page = {}
@@ -144,17 +234,31 @@ def _load_blocks(blocks_dir, n):
         return json.load(f)["blocks"]
 
 
-def render_page(blocks_dir, n, skip_title=None):
+def _fmt_line(text, bold, centered):
+    """按 detect 判定的 加粗/居中 格式化单行文本。
+    用纯 HTML（<strong> / <div style="text-align:center">）避免 markdown 解析器
+    在 HTML 块内不处理 `**` 的问题。"""
+    if bold:
+        text = f"<strong>{text}</strong>"
+    if centered:
+        return f'<div style="text-align:center">{text}</div>'
+    return text
+
+
+def render_page(blocks_dir, n, skip_title=None, no_headings=False):
     """渲染一页 blocks 为 Markdown。
 
     skip_title: 若给出标题文本，渲染时跳过第一个与之相同的 heading（用于避免
         与文件头 `# {title}` 重复，如自定义章节标题书的一二级 heading 重复）。
+    no_headings: 长图切分的内容没有真实标题，把所有 heading 当普通文本输出。
+    段落内每行 = 一个 OCR text block（对应原图的一行视觉文字），用 `\n` 连接，
+    保留原图换行结构。
     """
     blocks = _load_blocks(blocks_dir, n)
     if not blocks:
         return ""
     out = []
-    skip_done = skip_title is None
+    skip_done = skip_title is None or no_headings
     sorted_blocks = sorted(blocks, key=lambda b: (b["y_top"], 1 if b["type"] == "image" else 0))
     merged = []
     for b in sorted_blocks:
@@ -170,7 +274,7 @@ def render_page(blocks_dir, n, skip_title=None):
     for b in merged:
         if b["type"] == "image":
             if cur_para:
-                out.append("\n".join(cur_para) + "\n\n")
+                out.append("".join(cur_para) + "\n\n")
                 cur_para = []
             cap = b.get("caption", "").strip()
             alt = cap if cap else "插图"
@@ -182,8 +286,24 @@ def render_page(blocks_dir, n, skip_title=None):
                 skip_done = True
                 last_y = b["y_bottom"]
                 continue
+            if no_headings:
+                # 长图切分：标题当普通文本，但按几何聚类 para_start 分段落
+                _bold = bool(b.get("bold"))
+                _centered = bool(b.get("centered"))
+                if bool(b.get("para_start")) and cur_para:
+                    out.append("".join(cur_para) + "\n\n")
+                    cur_para = []
+                if _centered:
+                    if cur_para:
+                        out.append("".join(cur_para) + "\n\n")
+                        cur_para = []
+                    out.append(_fmt_line(b["text"], _bold, True) + "\n\n")
+                else:
+                    cur_para.append(_fmt_line(b["text"], _bold, False))
+                last_y = b["y_bottom"]
+                continue
             if cur_para:
-                out.append("\n".join(cur_para) + "\n\n")
+                out.append("".join(cur_para) + "\n\n")
                 cur_para = []
             level = b.get("level", 3)
             marker = "#" * level
@@ -191,39 +311,184 @@ def render_page(blocks_dir, n, skip_title=None):
             last_y = b["y_bottom"]
         else:
             t = b["text"]
-            if last_y is not None and b["y_top"] - last_y > 60:
+            bold = bool(b.get("bold"))
+            centered = bool(b.get("centered"))
+            # 段落开始：detect 已按几何聚类算出 para_start；为 True 时开新段
+            if bool(b.get("para_start")) and cur_para:
+                out.append("".join(cur_para) + "\n\n")
+                cur_para = []
+            if centered:
+                # 居中行独占一段（HTML div 居中），加粗一并应用
                 if cur_para:
-                    out.append("\n".join(cur_para) + "\n\n")
+                    out.append("".join(cur_para) + "\n\n")
                     cur_para = []
-            cur_para.append(t)
+                out.append(_fmt_line(t, bold, centered) + "\n\n")
+            else:
+                cur_para.append(_fmt_line(t, bold, False))
             last_y = b["y_bottom"]
     if cur_para:
-        out.append("\n".join(cur_para) + "\n\n")
+        out.append("".join(cur_para) + "\n\n")
+    return "".join(out)
+
+
+def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=False,
+                                skip_pages=()):
+    """跨页渲染：把 pages 列表里所有页的 blocks 合在一起按 y 排序，
+    段落状态 cur_para 跨页延续——detect 标 para_start=False 的首行（切片边界
+    续行）自动并入上一段，消除长图切片造成的"段中换页=两段"伪断裂。
+
+    skip_pages: 这些页整页不参与渲染（沿用旧的 front 跳过第10/11/12页逻辑）。
+    """
+    out = []
+    all_blocks = []
+    for n in pages:
+        if n in skip_pages:
+            continue
+        b = _load_blocks(blocks_dir, n)
+        if not b:
+            continue
+        for bb in b:
+            all_blocks.append((n, bb))
+    if not all_blocks:
+        return ""
+    # 跨页按 y 排序：同一页内按 y_top，跨页时不要把不同页的 y 混在一起直接比
+    # （不同页坐标系独立），但这里 OCR y_top 是 detect 用当前页 H 算出的像素，
+    # 不同页 H 相近且长图切片是按 y 顺序切的，按 (n, y_top) 排序天然就是阅读顺序。
+    all_blocks.sort(key=lambda nb: (nb[0], nb[1]["y_top"]))
+
+    # 标题合并：按**视觉位置**分组排序（先 y_top 行、同行内按 x0 从左到右），
+    # 使标题文本顺序与图片一致，与 OCR 拆行无关；拼接不加空格。
+    merged = []
+    for n, b in all_blocks:
+        if (b["type"] == "heading" and merged and merged[-1][1]["type"] == "heading"
+                and merged[-1][1]["level"] == b["level"]
+                and b["y_top"] - merged[-1][1]["y_bottom"] < 130):
+            # 并入当前 heading 组
+            cur = merged[-1][1]
+            cur["_group"].append(b)
+            cur["y_bottom"] = max(cur["y_bottom"], b["y_bottom"])
+        else:
+            nb = dict(b)
+            if nb.get("type") == "heading":
+                nb["_group"] = []
+            merged.append((n, nb))
+    # 对每个 heading 组按**视觉位置**排序拼接：同行(y_top 相近)按 x0 从左到右，
+    # 行间按 y 从上到下——与 _long_image_title 一致，保证正文标题与文件头一致可 skip。
+    for n, b in merged:
+        if b.get("type") == "heading":
+            g = [b] + b.pop("_group", [])
+            row_tol = max((hh.get("y_bottom", 0) - hh.get("y_top", 0) for hh in g),
+                          default=20) * 0.6
+            rows = []
+            for hh in g:
+                placed = False
+                for r in rows:
+                    if abs(hh["y_top"] - r["y_top"]) <= row_tol:
+                        r["items"].append(hh)
+                        placed = True
+                        break
+                if not placed:
+                    rows.append({"y_top": hh["y_top"], "items": [hh]})
+            rows.sort(key=lambda r: r["y_top"])
+            parts = []
+            for r in rows:
+                r["items"].sort(key=lambda hh: hh.get("x0", 0))
+                parts.append("".join(hh.get("text", "").strip() for hh in r["items"]))
+            b["text"] = "".join(parts)
+            b["y_bottom"] = max(hh["y_bottom"] for hh in g)
+            b["bold"] = any(hh.get("bold") for hh in g)
+            b["centered"] = all(hh.get("centered") for hh in g)
+
+    # skip_done 只在"没有标题要跳过"时直接置 True；no_headings 时仍允许
+    # 跳过与文件头 # {title} 重复的标题（长图标题已在文件头写 #）。
+    skip_done = skip_title is None
+    cur_para = []
+    SENT_END = ("。", "！", "？")
+    # 跨页权威段落判定：基于合并后的阅读顺序，用纯文本标点（"上一行以句末标点
+    # 结尾 / 本行是节标签"）重算 para_start——detect 的 per-page 输出对切片首行
+    # 无上下文（i=0 默认 False），需在此处用真实的"前一行"修正。
+    prev_text = ""
+    for n, b in merged:
+        if b["type"] == "image":
+            if cur_para:
+                out.append("".join(cur_para) + "\n\n")
+                cur_para = []
+            cap = b.get("caption", "").strip()
+            alt = cap if cap else "插图"
+            out.append(f"![{alt}](../figs/{b['file']})\n\n")
+            prev_text = ""
+            continue
+        if b["type"] == "heading":
+            if not skip_done and b["text"].strip() == skip_title:
+                skip_done = True
+                prev_text = b["text"].rstrip()
+                continue
+            if no_headings:
+                _bold = bool(b.get("bold"))
+                _centered = bool(b.get("centered"))
+                if bool(b.get("para_start")) and cur_para:
+                    out.append("".join(cur_para) + "\n\n")
+                    cur_para = []
+                if _centered:
+                    if cur_para:
+                        out.append("".join(cur_para) + "\n\n")
+                        cur_para = []
+                    out.append(_fmt_line(b["text"], _bold, True) + "\n\n")
+                else:
+                    cur_para.append(_fmt_line(b["text"], _bold, False))
+                prev_text = b["text"].rstrip()
+                continue
+            if cur_para:
+                out.append("".join(cur_para) + "\n\n")
+                cur_para = []
+            level = b.get("level", 3)
+            marker = "#" * level
+            out.append(f"{marker} {b['text']}\n\n")
+            prev_text = b["text"].rstrip()
+            continue
+        t = b["text"]
+        bold = bool(b.get("bold"))
+        centered = bool(b.get("centered"))
+        # 跨页权威 para_start：节标签 或 上一行是句末标点
+        is_label = t.strip().endswith("：")
+        para_start = is_label or (prev_text.endswith(SENT_END) if prev_text else False)
+        if para_start and cur_para:
+            out.append("".join(cur_para) + "\n\n")
+            cur_para = []
+        if centered:
+            if cur_para:
+                out.append("".join(cur_para) + "\n\n")
+                cur_para = []
+            out.append(_fmt_line(t, bold, centered) + "\n\n")
+        else:
+            cur_para.append(_fmt_line(t, bold, False))
+        prev_text = t.rstrip()
+    if cur_para:
+        out.append("".join(cur_para) + "\n\n")
     return "".join(out)
 
 
 def _write_chapter(blocks_dir, md_tmp, spec):
     kind, slug, fname, title, start, end = spec
     p = os.path.join(md_tmp, fname)
-    parts = [f"# {title}\n\n"]
+    # 空标题（如长图切分合并的单篇）不写 `#`，避免无意义的空标题
+    head = ([f"# {title}\n\n"] if title else [])
     if kind == "front":
-        for n in range(start, end + 1):
-            if n in (10, 11, 12):
-                continue
-            if not _load_blocks(blocks_dir, n):
-                continue
-            parts.append(render_page(blocks_dir, n))
+        body = _render_pages_cross_page(
+            blocks_dir, list(range(start, end + 1)),
+            skip_pages=(10, 11, 12))
     elif kind == "part_intro":
-        if _load_blocks(blocks_dir, start):
-            parts.append(render_page(blocks_dir, start))
+        body = _render_pages_cross_page(blocks_dir, [start])
     else:
-        for n in range(start, end + 1):
-            if not _load_blocks(blocks_dir, n):
-                continue
-            # 渲染时跳过与该章 title 相同的第一个 heading，避免与文件头 # {title} 重复
-            parts.append(render_page(blocks_dir, n, skip_title=title))
+        # 长图切分（slug 为空）：文章标题已从长图顶部粗体取到，正文里其余
+        # heading（图表标题等）仍当普通文本，只在文件头写 # 标题、并跳过正文
+        # 里与标题相同的首个 heading 避免重复。普通书则按 heading 正常渲染。
+        is_long_image = (slug == "")
+        body = _render_pages_cross_page(
+            blocks_dir, list(range(start, end + 1)),
+            skip_title=title, no_headings=is_long_image or not bool(title))
     with open(p, "w", encoding="utf-8") as f:
-        f.write("".join(parts))
+        f.write("".join(head) + body)
     return p
 
 

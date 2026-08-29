@@ -29,10 +29,13 @@ def page_done(json_dir, n):
     return os.path.isfile(os.path.join(json_dir, f"{n}.json"))
 
 
-def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end, reuse_broken=False):
+def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
+                      reuse_broken=False, force=False):
     """分段调用 Swift OCR，捕获 SIGBUS 崩溃并二分定位崩溃页、跳过继续。
 
     逻辑完全沿用 run.py 的 run_ocr_resilient。
+    Args:
+        force: True 时忽略已有 json（强制重跑所有页，配合 --force）
     """
     broken = os.path.join(json_dir, "broken.txt")
     skipped_pages = set()
@@ -40,12 +43,35 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end, reuse_br
         with open(broken, encoding="utf-8") as f:
             skipped_pages = {int(x) for x in f.read().split() if x.strip()}
 
+    # force 时：清空目标 OCR 目录（json_dir 与 txt_dir）下的所有文件，
+    # 让 Swift 二进制不会再"跳过(已存在)"。逐文件 os.remove，不删目录本身。
+    if force:
+        for d in (json_dir, txt_dir):
+            if not os.path.isdir(d):
+                continue
+            for name in os.listdir(d):
+                fpath = os.path.join(d, name)
+                if os.path.isfile(fpath):
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+        if os.path.isfile(broken):
+            try:
+                os.remove(broken)
+            except OSError:
+                pass
+        skipped_pages.clear()
+
     def img_exists(p):
         return os.path.isfile(os.path.join(img_dir, f"p{p}.jpg"))
 
+    def need_ocr(p):
+        """该页是否需要 OCR：force 时强制，否则 json 已存在则跳过。"""
+        return (force or not page_done(json_dir, p)) and img_exists(p)
+
     def seg_run(a, b):
-        want = [p for p in range(a, b + 1)
-                if not page_done(json_dir, p) and img_exists(p)]
+        want = [p for p in range(a, b + 1) if need_ocr(p)]
         if not want:
             return [], False
         r = subprocess.run([bin_path, img_dir, txt_dir, json_dir, str(a), str(b)],
@@ -59,9 +85,8 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end, reuse_br
             print(f"  [!] 段 p{a}..p{b} 未完成：{len(want)} 页产出 {len(got)}（code {r.returncode}）")
         return new_ok, failed
 
-    todo = [p for p in range(start, end + 1)
-            if not page_done(json_dir, p) and p not in skipped_pages]
-    print(f"待 OCR 页: {len(todo)} 张（已缓存跳过）")
+    todo = [p for p in range(start, end + 1) if need_ocr(p) and p not in skipped_pages]
+    print(f"待 OCR 页: {len(todo)} 张" + ("" if force else "（已缓存跳过）"))
 
     i = 0
     while i < len(todo):
@@ -84,7 +109,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end, reuse_br
             else:
                 lo = mid + 1
         crash_page = lo
-        if not page_done(json_dir, crash_page) and img_exists(crash_page):
+        if need_ocr(crash_page):
             single_ok, single_crashed = seg_run(crash_page, crash_page)
             if single_crashed and not page_done(json_dir, crash_page):
                 print(f"  [!] p{crash_page} 触发 Vision SIGBUS，已跳过（记录到 broken.txt）")
@@ -97,7 +122,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end, reuse_br
                 with open(broken, "a", encoding="utf-8") as f:
                     f.write(f"{crash_page}\n")
         todo = [p for p in range(start, end + 1)
-                if not page_done(json_dir, p) and p not in skipped_pages]
+                if need_ocr(p) and p not in skipped_pages]
         i = 0
 
     with open(broken, "w", encoding="utf-8") as f:
@@ -112,14 +137,28 @@ PAGE_RE = re.compile(r"(\d+)")
 
 
 def scan_pages(images_dir):
-    """扫描截图目录，从文件名提取页号，返回 {页号: 文件名} 映射。"""
+    """扫描截图目录，从文件名提取页号，返回 {页号: 文件名} 映射。
+
+    按 (页号, 文件名) 排序，保证处理顺序稳定；同页号（文件名里数字相同，如
+    "8-28.png"/"8-29.jpg" 都抽到 8）冲突时，按文件名顺序把后一个文件放到
+    下一个可用页号，避免 dict 覆盖丢失文件。无冲突项目（如 page_180/182/184）
+    页号不变，排序不受影响。
+    """
     pages = {}
     if not os.path.isdir(images_dir):
         return pages
+    items = []
     for f in os.listdir(images_dir):
         m = PAGE_RE.search(f)
         if m:
-            pages[int(m.group(1))] = f
+            items.append((int(m.group(1)), f))
+    items.sort(key=lambda t: (t[0], t[1]))
+    used = set()
+    for pn, f in items:
+        while pn in used:  # 冲突：顺延到下一个未用页号
+            pn += 1
+        pages[pn] = f
+        used.add(pn)
     return pages
 
 
@@ -153,7 +192,199 @@ def _is_blank_image(im, uniform_ratio=0.999):
         return False
 
 
+def _find_split_points(gray, max_h=2600, min_h=1400, blank_ratio=0.003):
+    """在空白行处找切点，避免切断图表/文字。
+
+    滚动长图里每段（图 + 说明文字）之间常有整行空白。计算每行"非背景"像素量，
+    标记近空白行，找空白带，然后贪心地在 [last+min_h, last+max_h] 窗口里选最宽的
+    空白带中心下刀——保证每片落在 [min_h, max_h]，且切面在空白处，不切在图上。
+
+    只有某段图本身超过 max_h 时（极少数）才退化为在窗口中部切。
+
+    Args:
+        gray: 灰度 numpy 数组 (H, W)
+        max_h / min_h: 每片高度区间
+        blank_ratio: 空白行判定阈值（该行非背景像素数 < W*blank_ratio 视为空白）
+    Returns:
+        切点 y 坐标列表（每片起点，不含 0 与 H）
+    """
+    import numpy as np
+    H, W = gray.shape
+    content = (gray < 200).sum(axis=1)
+    blank_thr = max(2, int(W * blank_ratio))
+    is_blank = content < blank_thr
+    gaps = []  # (start, end) 空白带（end 不含）
+    y = 0
+    while y < H:
+        if is_blank[y]:
+            s = y
+            while y < H and is_blank[y]:
+                y += 1
+            if y - s >= 15:  # 至少 15px 才算可用空白带
+                gaps.append((s, y))
+        else:
+            y += 1
+
+    cuts = []
+    last = 0
+    while H - last > max_h:
+        lo = last + min_h
+        hi = min(last + max_h, H)
+        best = None
+        for (s, e) in gaps:
+            ov_s = max(s, lo)
+            ov_e = min(e, hi)
+            if ov_e - ov_s >= 15:
+                center = (ov_s + ov_e) // 2
+                # 优先更宽；同宽优先更靠近窗口中心
+                key = ((ov_e - ov_s), -(abs(center - (lo + hi) // 2)), center)
+                if best is None or key > best:
+                    best = key
+        if best:
+            cut = best[2]
+        else:
+            # 该窗口内无空白带（图本身超过 max_h），取窗口中部（不可避免切图）
+            cut = lo + (hi - lo) // 2
+        cuts.append(cut)
+        last = cut
+    return cuts
+
+
+def _to_rgb(im):
+    """RGBA/其他模式 → RGB（透明合成白底）。"""
+    from PIL import Image
+    if im.mode == "RGBA":
+        bg = Image.new("RGB", im.size, (255, 255, 255))
+        bg.paste(im, mask=im.split()[3])
+        return bg
+    if im.mode != "RGB":
+        return im.convert("RGB")
+    return im
+
+
+def _trim_image(im, pad_ratio=0.01):
+    """智能 trim：用边缘检测找内容包围盒，裁掉四边空白；再去掉右侧灰色滚动条。
+
+    所有阈值都**相对图片尺寸**（比例），不依赖固定像素，对分辨率/边距变化鲁棒：
+      - pad = max(2, min(W,H)*pad_ratio)
+      - 滚动条宽度区间 = W*[0.5%, 8%]
+      - 滚动条到右边缘距离上限 = W*10%
+      - 滚动条内部 = 深+浅两端像素都占该列高 >15%（bimodal 轨道+滑块），
+        且列均灰度偏离背景主色。
+    滚动条检测基于结构：它是与内容有白缝分隔、位于右侧的窄灰竖条。
+    """
+    W, H = im.size
+    if W < 120 or H < 120:
+        return im
+    import numpy as np
+    rgb = _to_rgb(im)
+    gray = np.asarray(rgb.convert("L")).astype(np.float32)
+    pad = max(2, int(min(W, H) * pad_ratio))
+
+    # ---- 1) Sobel 边缘 + 滚动条列识别（滚动条列不算"内容"）----
+    gx = np.zeros_like(gray); gy = np.zeros_like(gray)
+    gx[:, 1:-1] = gray[:, 2:] - gray[:, :-2]
+    gy[1:-1, :] = gray[2:, :] - gray[:-2, :]
+    mag = np.sqrt(gx * gx + gy * gy)
+    edge = mag > 30
+    hist = np.bincount(gray.astype(np.int64).ravel(), minlength=256)
+    bg = int(hist.argmax())
+    # 滚动条列：列均灰度 150-210（灰带）+ bimodal（深+浅都>15%）+
+    # 结构性：整列"暗像素段"数量少（滚动条=轨道+滑块，暗像素集中在少数几段；
+    # K 线图内容列=大量分散的蜡烛，暗像素段很多）。
+    dr = (gray < 70).mean(axis=0); lr = (gray > 210).mean(axis=0)
+    col_mean = gray.mean(axis=0)
+    dark_mask = (gray < 70)
+    # 每列暗像素的连续段数（行维）：统计"非暗→暗"的跳变次数
+    col_dark_runs = np.zeros(W, dtype=int)
+    if dark_mask.shape[0] > 1:
+        starts = dark_mask[1:] & ~dark_mask[:-1]
+        col_dark_runs = starts.sum(axis=0)
+        col_dark_runs += dark_mask[0]  # 首行是暗也算一段开始
+    sb_col = ((dr > 0.15) & (lr > 0.15) & (col_mean > 150) & (col_mean < 210)
+             & (col_dark_runs < 100))
+    # 滚动条段：连续的 sb_col，最右段且宽度 W*[0.5%, 8%]、距右边 ≤ W*10%
+    w_min = max(3, int(W * 0.005)); w_max = max(w_min + 1, int(W * 0.08))
+    dist_max = int(W * 0.10)
+    sb_mask = np.zeros(W, dtype=bool)
+    _idx = np.where(sb_col)[0]
+    if len(_idx) >= 3:
+        _runs = []; _start = _prev = int(_idx[0])
+        for i in _idx[1:]:
+            i = int(i)
+            if i - _prev > 1:
+                _runs.append((_start, _prev)); _start = i
+            _prev = i
+        _runs.append((_start, _prev))
+        for (rs, re) in reversed(_runs):
+            w = re - rs + 1
+            if w_min <= w <= w_max and (W - 1 - re) <= dist_max:
+                sb_mask[rs:re+1] = True
+                break
+    # 内容 = 边缘或与背景差异明显，但**排除滚动条列**（滚动条不是图内容）
+    content = (edge | (np.abs(gray - bg) > 50))
+    if sb_mask.any():
+        content[:, sb_mask] = False
+
+    # ---- 2) 裁四边空白 ----
+    row_c = content.any(axis=1); col_c = content.any(axis=0)
+    ys = np.where(row_c)[0]; xs = np.where(col_c)[0]
+    if len(ys) == 0 or len(xs) == 0:
+        return im
+    y0 = max(0, int(ys.min()) - pad); y1 = min(H, int(ys.max()) + 1 + pad)
+    x0 = max(0, int(xs.min()) - pad); x1 = min(W, int(xs.max()) + 1 + pad)
+    # 若识别到滚动条：强制裁到滚动条左边界（右侧的一切——滚动条 + 右边框/阴影都裁掉）
+    if sb_mask.any():
+        sb_left = int(np.where(sb_mask)[0].min())
+        if sb_left > x0:
+            x1 = min(x1, sb_left)
+    return rgb.crop((x0, y0, x1, y1))
+
+
 BLANK_PAGES_FILE = "blank_pages.txt"
+LONG_IMAGE_PAGES_FILE = "long_image_pages.txt"
+
+
+def long_image_pages_path(out):
+    """长图切分页记录文件路径（<out>/long_image_pages.txt）。"""
+    return os.path.join(out, LONG_IMAGE_PAGES_FILE)
+
+
+def read_long_image_pages(out):
+    """读取长图切分页记录：{源文件名: [页号,...]}。文件不存在或为空返回 {}。
+
+    格式：每行 `源文件名<TAB>页号1,页号2,...`（文件名可含空格，用制表符分隔）。
+    """
+    p = long_image_pages_path(out)
+    result = {}
+    if not os.path.isfile(p):
+        return result
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                if "\t" in line:
+                    name, pages = line.split("\t", 1)
+                else:
+                    name, pages = line, line  # 兼容旧格式（一行全是页号）
+                nums = [int(x) for x in pages.replace(",", " ").split() if x.strip()]
+                if nums:
+                    result[name] = sorted(set(nums))
+    except Exception:
+        return {}
+    return result
+
+
+def write_long_image_pages(out, long_image_pages):
+    """把长图切分页记录写入文件（覆盖）。long_image_pages: {源文件名: [页号,...]}。"""
+    p = long_image_pages_path(out)
+    os.makedirs(out, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        for name in sorted(long_image_pages):
+            nums = sorted(set(long_image_pages[name]))
+            f.write(f"{name}\t{','.join(str(x) for x in nums)}\n")
 
 
 def blank_pages_path(out):
@@ -181,22 +412,37 @@ def write_blank_pages(out, page_nums):
         f.write(" ".join(str(x) for x in sorted(set(page_nums))))
 
 
-def prepare_images(images_dir, pages, out, force=False):
+def prepare_images(images_dir, pages, out, force=False,
+                   max_ratio=3.0, max_h=2600, min_h=1400, slice_ratio=3.0):
     """把输入图片统一归一化为 JPEG，输出到 <out>/_ocr_tmp/。
-    返回临时图片目录。完全沿用 run.py 的 prepare_images。
+    返回 (临时图片目录, 展开后的 pages 字典)。完全沿用 run.py 的 prepare_images。
 
-    自动过滤"完全空白"的图片（如透明白图）：不产出对应的 p{n}.jpg，
-    并把空白页号写入 <out>/blank_pages.txt 持久化——最终做 PDF 的各流
-    （img/layed/text）读取该记录统一过滤，保证原图目录 / _ocr_tmp 都不含空白页。
+    处理两件事：
+    1. 自动过滤"完全空白"的图片（如透明白图）：不产出对应的 p{n}.jpg，
+       并把空白页号写入 <out>/blank_pages.txt 持久化。
+    2. 超长图（高宽比 >= max_ratio，如滚动长截图）内容感知切分为多片：
+       在空白行处切，避免切断内部图表；每片登记为新页（连续页号），
+       扩入 pages，使 OCR/detect/build 按多页处理。
 
     Args:
         force: True 时绕过 mtime 缓存，重新处理所有页（配合 --force 全步骤无缓存）
+        max_ratio: 超过该高宽比即视为超长图，触发切分
+        max_h / min_h: 切分后每片高度区间（px）
+        slice_ratio: 切片高度上限相对图片宽度的比例（约=内容区高/宽）。
+            超长图每片高 ≤ max(slice_ratio*W, min_h)，这样在 layed 流里各片
+            都是宽度受限（scale=content_w/W）→ 图片宽度全页一致，不出现"页面宽度不一"。
+    Returns:
+        (tmp, pages)：tmp 为预处理图目录，pages 为展开（含切片子页）后的页号映射
     """
     tmp = os.path.join(out, "_ocr_tmp")
     os.makedirs(tmp, exist_ok=True)
     from PIL import Image
-    converted = copied = blank = 0
+    import numpy as np
+    converted = copied = blank = sliced = 0
     blank_pages = []
+    # 长图切分页：{源文件名: [切片页号]}——每张长图单独成章，不与其他混合
+    long_image_pages = {}
+    new_pages = dict(pages)
     for n, fname in sorted(pages.items()):
         src = os.path.join(images_dir, fname)
         dst = os.path.join(tmp, f"p{n}.jpg")
@@ -204,13 +450,62 @@ def prepare_images(images_dir, pages, out, force=False):
             continue
         # 先判空白（放在 mtime 缓存判断之前），保证重跑时也能清掉历史残留的空白页
         im = Image.open(src)
+        # 预处理：边缘检测裁四边空白 + 去掉右侧灰色滚动条（避免误识别为内容）
+        im = _trim_image(im)
         if _is_blank_image(im):
-            # 完全空白（纯色、无信息）→ 过滤：删掉历史 p{n}.jpg，不产出，OCR/detect 自动跳过
             if os.path.isfile(dst):
                 os.remove(dst)
             blank += 1
             blank_pages.append(n)
             continue
+
+        W, H = im.size
+        # 超长图 → 内容感知切分
+        if H > min_h and H / W >= max_ratio:
+            rgb = _to_rgb(im)
+            gray = np.asarray(rgb.convert("L"))
+            # 切片高度上限按图片宽度 × slice_ratio（≈内容区高/宽），保证 layed 里各片
+            # 都是宽度受限 → 图片宽度全页一致。
+            _slice_max_h = max(int(W * slice_ratio), min_h)
+            cuts = _find_split_points(gray, max_h=_slice_max_h, min_h=min_h)
+            if cuts:
+                # 清掉本文件可能存在的旧切片（只删属于本文件 fname 的页，
+                # 避免误删别的长图（如 8-28 的切片）被 8-29 的清理误删）
+                for pn in list(new_pages):
+                    if pn >= n and new_pages.get(pn) == fname:
+                        old = os.path.join(tmp, f"p{pn}.jpg")
+                        if os.path.isfile(old):
+                            os.remove(old)
+                pts = [0] + cuts + [H]
+                # 合并过小的切片（多为尾部空白残留）：<200px 并入前一片，避免无意义的小页
+                merged = []
+                for y0, y1 in zip(pts[:-1], pts[1:]):
+                    if merged and y1 - merged[-1][1] < 200:
+                        merged[-1] = (merged[-1][0], y1)
+                    else:
+                        merged.append((y0, y1))
+                # 连续重编号：从 n 开始；若 n 已被别的文件切片占用（如 8-29 的 n=9
+                # 被 8-28 切片占用），则从最大已用页+1 起，避免两张长图切片页号重叠。
+                _pn = n
+                if new_pages.get(n) not in (None, fname):
+                    _pn = max(new_pages) + 1 if new_pages else n
+                # 只删除本文件原来的单页 p{n}.jpg（若该页属于本文件）
+                if new_pages.get(n) == fname:
+                    del new_pages[n]
+                _kept = 0
+                for y0, y1 in merged:
+                    if y1 - y0 < 200:
+                        continue
+                    crop = rgb.crop((0, y0, W, y1))
+                    crop.save(os.path.join(tmp, f"p{_pn}.jpg"), "JPEG", quality=95)
+                    new_pages[_pn] = fname
+                    long_image_pages.setdefault(fname, []).append(_pn)
+                    _pn += 1
+                    _kept += 1
+                if _kept > 0:
+                    sliced += 1
+                continue
+
         if not force and os.path.isfile(dst) and os.path.getmtime(dst) >= os.path.getmtime(src):
             continue
         fmt = im.format
@@ -218,20 +513,19 @@ def prepare_images(images_dir, pages, out, force=False):
             shutil.copyfile(src, dst)
             copied += 1
             continue
-        if im.mode == "RGBA":
-            bg = Image.new("RGB", im.size, (255, 255, 255, 255))
-            bg.paste(im, mask=im.split()[3])
-            im = bg
-        elif im.mode != "RGB":
-            im = im.convert("RGB")
-        im.save(dst, "JPEG", quality=95)
+        rgb = _to_rgb(im)
+        rgb.save(dst, "JPEG", quality=95)
         converted += 1
     if blank:
         print(f"  已过滤 {blank} 张完全空白图片（无信息）：{blank_pages}")
+    if sliced:
+        print(f"  已切分 {sliced} 张超长图（空白处切分，避免切到图表），"
+              f"页数 {len(pages)} → {len(new_pages)}")
     write_blank_pages(out, blank_pages)
+    write_long_image_pages(out, long_image_pages)
     print(f"图片预处理完成：{copied} 张 JPEG 直接复制 + {converted} 张转 JPEG"
-          f" + {blank} 张空白过滤（临时目录 {tmp}）")
-    return tmp
+          f" + {blank} 张空白过滤 + {sliced} 张长图切分（临时目录 {tmp}）")
+    return tmp, new_pages
 
 
 def run(project, images_dir, start=None, end=None, force_ocr=False):
@@ -263,7 +557,25 @@ def run(project, images_dir, start=None, end=None, force_ocr=False):
     end = end if end is not None else rng[1]
     print(f"检测到 {len(pages)} 页，OCR 范围 p{start}..p{end}")
 
-    img_for_ocr = prepare_images(images_dir, pages, out, force=force_ocr)
+    # 超长图切分参数（可配置）
+    from .config import Config
+    _cfg = Config(str(project.path))
+    _max_ratio = float(_cfg.get('book.split_long_image_max_ratio', 3.0))
+    _max_h = int(_cfg.get('book.split_slice_max_h', 2600))
+    _min_h = int(_cfg.get('book.split_slice_min_h', 1400))
+    _slice_ratio = float(_cfg.get('book.split_slice_ratio', 3.0))
+
+    img_for_ocr, pages = prepare_images(
+        images_dir, pages, out, force=force_ocr,
+        max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
+        slice_ratio=_slice_ratio)
+
+    # 切分后页号可能扩展（长图→多片），用展开后的 pages 重算范围
+    rng2 = auto_page_range(pages)
+    if start is None or (rng2 and rng2[1] > end):
+        end = rng2[1] if rng2 else end
+    if rng2:
+        start = min(start, rng2[0]) if start is not None else rng2[0]
 
     if os.path.isdir(os.path.join(ocr_cache, "pages_json")) and not force_ocr:
         print("复用 OCR 缓存:", ocr_cache)
@@ -274,5 +586,5 @@ def run(project, images_dir, start=None, end=None, force_ocr=False):
         run_ocr_resilient(bin_path, img_for_ocr,
                           str(project.get_ocr_pages_dir()),
                           str(project.get_ocr_pages_json_dir()),
-                          start, end, reuse_broken=False)
+                          start, end, reuse_broken=False, force=force_ocr)
     return img_for_ocr, start, end

@@ -217,6 +217,10 @@ book:
   start_page: null    # 起始页（默认自动探测）
   end_page: null      # 结束页（默认自动探测）
   force_ocr: false    # 忽略 OCR 缓存，强制重跑（等价命令行 --force）
+  split_long_image_max_ratio: 3.0   # 高宽比超过该值视为超长图，OCR 前切分为多片（0 关闭）
+  split_slice_max_h: 2600           # 长图切片每片最大高度（px，上限）
+  split_slice_min_h: 1400           # 长图切片每片最小高度（px）
+  split_slice_ratio: 3.0            # 切片高/宽比上限；layed 流对超高切片自动跨多页，故可给大值保护图表不被切
 
 # 布局检测参数
 detect:
@@ -224,6 +228,12 @@ detect:
                       # 真实标题字号明显大于正文（"悖论系列N"1.31+/"第X章"1.29+）；
                       # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27）。
                       # 调高过滤更多误判，调低保留更多小字号标题。
+  bold_thickness_ratio: 0.078  # 加粗判定阈值（相对笔画粗细 = 笔画宽/行高）。
+                      # 用 scipy 距离变换估算笔画粗细；实测常规正文 ~0.075、粗体 ~0.082+。
+                      # 调高更严格（少判粗），调低更宽松（多判粗）。
+  middleware: ""       # blocks 中间件脚本（相对项目目录的 .py）。detect 产出 blocks 后、
+                      # text/layed 分流前运行，脚本须定义 process(blocks_dir, project_path)。
+                      #   仅配置它的项目生效（per-project 特别清理，如公众号头部多余信息）。
 
 # 全部流程（pipeline）最终 PDF 方式
 pipeline:
@@ -249,6 +259,8 @@ pdf:
   punct_compress: ""     # layedpdf 标点压缩 CSS 值，如 "-0.1em"（统一压缩）
                          #   也可用 dict 按标点类别分开设置，如：
                          #   punct_compress: {"，、。": "-0.3em", "（）《》【】": "-0.2em"}
+  layed_font_ratio: 0.78 # layedpdf 字号=OCR行高×该系数，随图片同比例缩放（解决文字与图大小不匹配）
+  layed_min_font_pt: 6.0 # layedpdf 最小字号 pt（防止过小行高算出太小字号）
 """
         self.config_file.write_text(template, encoding='utf-8')
 

@@ -43,7 +43,19 @@ HEADING_STYLE = {
 
 
 def _page_img_size(project, n):
-    """探测某页源图实际尺寸（像素）。找不到则用默认。"""
+    """探测某页实际图片尺寸（像素）。找不到则用默认。
+
+    优先用 OCR 预处理目录 _ocr_tmp/ 里的 p{n}.jpg——超长图被切分后，某页对应的是
+    切片（如 1403×1822）而非原长图（1403×12060），用错尺寸会让 scale 严重偏差，
+    导致文字/图位置挤成一小块。找不到再回退 data/images/ 与默认值。
+    """
+    tmp = project.output_dir / "_ocr_tmp"
+    cand = tmp / f"p{n}.jpg"
+    if cand.is_file():
+        try:
+            return Image.open(cand).size
+        except Exception:
+            pass
     img_dir = project.data_dir / "images"
     if img_dir.is_dir():
         for f in sorted(img_dir.iterdir()):
@@ -102,6 +114,16 @@ def _heading_lookup(blocks):
     return m
 
 
+def _text_style_lookup(blocks):
+    """文字行文本 → (centered, bold) 映射（detect 已判定每行是否居中/加粗）。"""
+    m = {}
+    for b in blocks:
+        if b["type"] in ("text", "heading"):
+            key = b["text"].strip()
+            m[key] = (bool(b.get("centered")), bool(b.get("bold")))
+    return m
+
+
 # 默认全角标点集合（未分组时的统一压缩范围）
 _DEFAULT_PUNCTS = "，。？！；：、\"\"''（）《》〈〉【】……—·～"
 
@@ -128,19 +150,20 @@ def _parse_punct_groups(punct_compress):
     return [(_DEFAULT_PUNCTS, str(punct_compress), "")]
 
 
-def render_page_html(project, n, W, H, scale, base_font_pt, x_off_mm, y_off_mm,
-                     font_family=None, justify=True, width_scale=1.0,
-                     letter_spacing=None, punct_compress=None):
-    """生成单个原书页的 HTML（绝对定位）。返回 (html, n_figs)。
+def render_page_html(project, n, W, H, scale, base_font_pt, x_off_mm, win_top_px,
+                     page_h_px, font_family=None, justify=True, width_scale=1.0,
+                     letter_spacing=None, punct_compress=None,
+                     font_height_ratio=0.78, min_font_pt=6.0):
+    """生成单个"页窗口"的 HTML（绝对定位）。返回 (html, n_figs)。
 
     文字与图片统一用同一个 scale（等比缩放），保证相对位置一致、不重叠、不变形。
-    W, H: 源图像素尺寸。scale: 像素→mm 统一比例（contain）。
-    base_font_pt: 正文基准字号(pt)。x_off_mm/y_off_mm: 画布左上角偏移(mm)。
-    font_family: 字体族（None 用系统默认衬线）。justify: 是否段落两端对齐。
-    width_scale: 文字容器宽度系数（OCR 宽 × scale，宽字体标点溢出时调小如 0.95）。
-    letter_spacing: CSS letter-spacing 值（如 '-0.02em' 轻微压缩）。
-    punct_compress: 标点压缩。可传字符串（如 '-0.1em'，统一压缩所有标点）
-        或 dict（如 {"，。、": "-0.3em", "（）《》": "-0.2em"}，按标点类别分别压缩）。
+    W, H: 源图像素尺寸。scale: 像素→mm 统一比例（宽度受限，保证各页宽度一致）。
+    base_font_pt: 正文基准字号(pt)。x_off_mm: 水平偏移(mm)。
+    win_top_px: 本页窗口在切片像素坐标里的起点 y。page_h_px: 一页能容纳的切片像素高。
+    只渲染 y 落在 [win_top_px, win_top_px+page_h_px) 内的内容，top=(y-win_top_px)*scale。
+    支持超高切片跨多页：每页一个窗口，宽度始终一致。
+    font_family: 字体族。justify: 是否两端对齐。width_scale: 文字容器宽度系数。
+    letter_spacing/punct_compress: 见 make_layedpdf。
     """
     groups = _parse_punct_groups(punct_compress)
     blocks = _load_blocks(project, n)
@@ -154,14 +177,19 @@ def render_page_html(project, n, W, H, scale, base_font_pt, x_off_mm, y_off_mm,
 
     regions = _collect_image_regions(blocks)
     heading_map = _heading_lookup(blocks)
+    text_style = _text_style_lookup(blocks)
 
     parts = []
     n_figs = 0
 
-    # 图片：定位到原书区域（统一 scale），裁图与文字同基准、不变形
+    # 图片：定位到原书区域（统一 scale），裁图与文字同基准、不变形。
+    # 只渲染与当前页窗口重叠的图；top 相对窗口起点。
+    win_end_px = win_top_px + page_h_px
     for r in regions:
         if "x0" not in r:
             continue
+        if r["y_bottom"] < win_top_px or r["y_top"] >= win_end_px:
+            continue  # 图不在本页窗口内，跳到下一页
         fig_path = _fig_abs_path(project, r["file"])
         if not fig_path.exists():
             continue
@@ -170,7 +198,7 @@ def render_page_html(project, n, W, H, scale, base_font_pt, x_off_mm, y_off_mm,
         if w <= 0 or h <= 0:
             continue
         x0 = x_off_mm + r["x0"] * scale
-        y0 = y_off_mm + r["y_top"] * scale
+        y0 = (r["y_top"] - win_top_px) * scale
         n_figs += 1
         style = (f"position:absolute;left:{x0:.2f}mm;top:{y0:.2f}mm;"
                  f"width:{w:.2f}mm;height:{h:.2f}mm;")
@@ -190,28 +218,41 @@ def render_page_html(project, n, W, H, scale, base_font_pt, x_off_mm, y_off_mm,
         h_px = ln["h"] * H
         w_px = ln["w"] * W
         yc = y_px + h_px / 2
+        # 只渲染本页窗口内的行；行顶超出窗口则跳到下一页
+        if y_px >= win_end_px:
+            continue
         # 跳过图内文字（表格/图内说明），它们已包含在裁图里
         if _line_in_image(yc, regions):
             continue
-        # 标题样式（仅改变字号/粗细/颜色，字号基于正文统一缩放，不随行高抖动）
+        # 字号由 OCR 行高按 scale 换算，随图片同比例缩放——否则固定字号与图片大小
+        # 不匹配（图撑满宽度时文字仍很小）。字号 ≈ 行高(像素→mm→pt) × font_height_ratio。
+        line_h_mm = h_px * scale
+        base_pt = max(line_h_mm * (72.0 / 25.4) * font_height_ratio, min_font_pt)
+        # 标题样式（仅改变字号/粗细/颜色）
         level = heading_map.get(text)
         if level in HEADING_STYLE:
             hs = HEADING_STYLE[level]
-            font_pt = base_font_pt * hs["scale"]
+            font_pt = base_pt * hs["scale"]
             weight = hs["weight"]
             color = hs["color"]
         else:
-            font_pt = base_font_pt
+            font_pt = base_pt
             weight = "normal"
             color = "#111111"
-        # 位置换算到 mm（统一 scale）
+        # detect 判定的居中/加粗：覆盖默认样式（加粗/居中行更贴近原图）
+        _centered, _bold = text_style.get(text, (False, False))
+        if _bold:
+            weight = "bold"
+        if _centered:
+            color = "#111111"  # 居中行多为标题/落款，用正文色
+        # 位置换算到 mm（统一 scale）；top 相对窗口起点
         left = x_off_mm + x_px * scale
-        top = y_off_mm + y_px * scale
+        top = (y_px - win_top_px) * scale
         w_mm = w_px * scale
         # 基线对齐：同一字号统一 line-height，按 y_top 定位，基线自然一致。
         # white-space:nowrap 保证一行不换行（OCR 每行已是独立行，无需内部换行）。
         family = f"font-family:{font_family};" if font_family else ""
-        align = "text-align:justify;" if justify else "text-align:left;"
+        align = "text-align:center;" if _centered else ("text-align:justify;" if justify else "text-align:left;")
         # 容器宽度 = OCR 宽 × width_scale（<1 让容器略窄，适配标点宽的字体）
         text_w = w_mm * width_scale
         ls = f"letter-spacing:{letter_spacing};" if letter_spacing else ""
@@ -317,6 +358,10 @@ def prepare_layed_articles(project, pages=None, base_font_pt=11.0,
     if punct_compress is None:
         punct_compress = cfg.get('pdf.punct_compress', None)
 
+    # 字号随图片缩放：字号 = OCR 行高(→mm→pt) × font_height_ratio，让文字与图片大小匹配。
+    font_height_ratio = float(cfg.get('pdf.layed_font_ratio', 0.78))
+    min_font_pt = float(cfg.get('pdf.layed_min_font_pt', 6.0))
+
     # section 大小 = A4 内容区（A4 减去 @page margin）；视觉边距由 document-factory
     # @page margin 直接提供（与 img 流完全一致），section 内坐标以左上角为 0。
     # 用 document-factory 的 effective_page_margin_mm：底部已 clamp 到至少
@@ -406,26 +451,46 @@ def prepare_layed_articles(project, pages=None, base_font_pt=11.0,
         sections = []
         for n in chapter_pages:
             W, H = get_page_size(n)
-            # content-area 内坐标，section 自身以 (0,0) 为原点；@page margin 已在
-            # 外层提供 inset（与 img 流完全一致）。
-            scale = min(width_mm / W, height_mm / H)
-            x_off = (width_mm - W * scale) / 2
-            y_off = (height_mm - H * scale) / 2
-            seg, _nf = render_page_html(
-                project, n, W, H, scale, base_font_pt, x_off, y_off,
-                font_family=font_family, justify=justify,
-                width_scale=width_scale, letter_spacing=letter_spacing,
-                punct_compress=punct_compress,
-            )
-            sections.append(f'<section class="layed-page">{seg}</section>')
+            # 统一宽度缩放：scale = width_mm/W → 各页图片宽度一致（长图切片不出现宽度不一）。
+            # 每页能容纳的切片像素高 page_h_px = height_mm/scale。
+            scale = width_mm / W
+            x_off = (width_mm - W * scale) / 2  # 恒 0（宽度受限）
+            page_h_px = height_mm / scale
+            if H <= page_h_px:
+                # 单页：垂直居中（win_top_px = 窗口起点在切片像素里的偏移）
+                win_top_px = max(0.0, (page_h_px - H) / 2)
+                seg, _nf = render_page_html(
+                    project, n, W, H, scale, base_font_pt, x_off, win_top_px,
+                    page_h_px,
+                    font_family=font_family, justify=justify,
+                    width_scale=width_scale, letter_spacing=letter_spacing,
+                    punct_compress=punct_compress,
+                    font_height_ratio=font_height_ratio, min_font_pt=min_font_pt,
+                )
+                sections.append(f'<section class="layed-page">{seg}</section>')
+            else:
+                # 超高切片：跨多页，每页一个 page_h_px 高的窗口，宽度一致，内容不丢
+                k = 0
+                while k * page_h_px < H:
+                    win_top_px = k * page_h_px
+                    seg, _nf = render_page_html(
+                        project, n, W, H, scale, base_font_pt, x_off, win_top_px,
+                        page_h_px,
+                        font_family=font_family, justify=justify,
+                        width_scale=width_scale, letter_spacing=letter_spacing,
+                        punct_compress=punct_compress,
+                        font_height_ratio=font_height_ratio, min_font_pt=min_font_pt,
+                    )
+                    sections.append(f'<section class="layed-page">{seg}</section>')
+                    k += 1
         return sections
 
     article_count = 0
 
     if chapters:
         for kind, slug, fname, title, start, end in chapters:
-            if kind == 'front':
-                continue  # 前言/版权独立成 section，已被 cover_images 处理
+            # front（前言/版权）也渲染为章节：有些书的前几页是正文（如长图首屏标题页），
+            # 若跳过会丢内容。有真实封面走 cover_images，front 页仍可保留。
             chapter_pages = [n for n in page_nums if start <= n <= end]
             if not chapter_pages:
                 continue

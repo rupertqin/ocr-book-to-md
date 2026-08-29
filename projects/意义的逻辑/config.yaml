@@ -17,7 +17,7 @@ pdf:
   page_margin: 0.5cm 1cm
   mode: full
   font_family: Hiragino Sans GB
-  menu_skip_articles: 2
+  toc_skip_articles: 2
   punct_compress:
     、。，”（《【…: -0.1em
   cover_images:
