@@ -193,13 +193,13 @@ def _is_blank_image(im, uniform_ratio=0.999):
 
 
 def _find_split_points(gray, max_h=2600, min_h=1400, blank_ratio=0.003):
-    """在空白行处找切点，避免切断图表/文字。
+    """在**段落边界**处找切点，避免把连续段落/图表拦腰切断。
 
-    滚动长图里每段（图 + 说明文字）之间常有整行空白。计算每行"非背景"像素量，
-    标记近空白行，找空白带，然后贪心地在 [last+min_h, last+max_h] 窗口里选最宽的
-    空白带中心下刀——保证每片落在 [min_h, max_h]，且切面在空白处，不切在图上。
-
-    只有某段图本身超过 max_h 时（极少数）才退化为在窗口中部切。
+    长图排版规律：一段文字内行距固定、段与段之间留白更宽（如正文行内 gap≈35px、
+    段间 gap≈110px，双峰清晰）。先识别"文本行"并统计行间距，定出**段间 gap**
+    （明显大于行内中位），再贪心地在 [last+min_h, last+max_h] 窗口内**优先选段间
+    gap 中心**下刀；窗口内无段界时退回选任意宽空白带；仍无（整段图超 max_h）才
+    取窗口中部。这样切点几乎总是落在段落之间，切完的片就是完整段落。
 
     Args:
         gray: 灰度 numpy 数组 (H, W)
@@ -213,38 +213,75 @@ def _find_split_points(gray, max_h=2600, min_h=1400, blank_ratio=0.003):
     content = (gray < 200).sum(axis=1)
     blank_thr = max(2, int(W * blank_ratio))
     is_blank = content < blank_thr
-    gaps = []  # (start, end) 空白带（end 不含）
+
+    # 内容行 run：分隔出文字行/图。文字行高通常 20~90px，图更高。
+    runs = []
     y = 0
     while y < H:
-        if is_blank[y]:
+        if not is_blank[y]:
             s = y
-            while y < H and is_blank[y]:
+            while y < H and not is_blank[y]:
                 y += 1
-            if y - s >= 15:  # 至少 15px 才算可用空白带
-                gaps.append((s, y))
+            if y - s >= 8:
+                runs.append((s, y))
         else:
             y += 1
 
+    # 文本行（高度像一行字）间的 gap：段内行距 vs 段间留白双峰。
+    # 用"两侧都是文本行"的 gap 估行内中位；段界 gap = 明显更宽（>1.8×行内中位）。
+    texts = [(s, e) for (s, e) in runs if 20 <= e - s <= 90]
+    line_gaps = [texts[i][0] - texts[i - 1][1]
+                 for i in range(1, len(texts))
+                 if 3 < texts[i][0] - texts[i - 1][1] < 300]
+    line_mid = None
+    if line_gaps:
+        m0 = float(np.median(line_gaps))
+        small = [g for g in line_gaps if g < m0]
+        line_mid = float(np.median(small)) if small else m0
+    # 候选落刀点：段间 gap 中心（文本行之间的大留白）+ 一般空白带中心
+    def _cut_points():
+        pts = []
+        # 段界：文本行间 gap 明显大于行内中位
+        if line_mid:
+            for i in range(1, len(texts)):
+                gp = texts[i][0] - texts[i - 1][1]
+                if gp > line_mid * 1.8 and 10 <= gp <= 600:
+                    pts.append((gp, (texts[i - 1][1] + texts[i][0]) // 2, "seg"))
+        # 一般空白带（含图间隙等，>=15px）
+        gap_bands = []
+        y = 0
+        while y < H:
+            if is_blank[y]:
+                s = y
+                while y < H and is_blank[y]:
+                    y += 1
+                if y - s >= 15:
+                    gap_bands.append((y - s, (s + y) // 2))
+            else:
+                y += 1
+        for w, c in gap_bands:
+            pts.append((w, c, "band"))
+        return pts
+
+    pts = _cut_points()
     cuts = []
     last = 0
     while H - last > max_h:
         lo = last + min_h
         hi = min(last + max_h, H)
-        best = None
-        for (s, e) in gaps:
-            ov_s = max(s, lo)
-            ov_e = min(e, hi)
-            if ov_e - ov_s >= 15:
-                center = (ov_s + ov_e) // 2
-                # 优先更宽；同宽优先更靠近窗口中心
-                key = ((ov_e - ov_s), -(abs(center - (lo + hi) // 2)), center)
-                if best is None or key > best:
-                    best = key
-        if best:
-            cut = best[2]
+        # 窗口内候选：段界优先（即使窄也优先，因为它保证不切段），空白带其次按宽
+        seg_in = [(abs(c - (lo + hi) // 2), c) for (w, c, t) in pts
+                  if t == "seg" and lo <= c <= hi]
+        if seg_in:
+            cut = min(seg_in)[1]
         else:
-            # 该窗口内无空白带（图本身超过 max_h），取窗口中部（不可避免切图）
-            cut = lo + (hi - lo) // 2
+            band_in = [(-w, -(abs(c - (lo + hi) // 2)), c)
+                       for (w, c, t) in pts if t == "band" and lo <= c <= hi]
+            if band_in:
+                cut = min(band_in)[2]
+            else:
+                # 整段图超 max_h 且无空白带：取窗口中部（不可避免切图/文字）
+                cut = lo + (hi - lo) // 2
         cuts.append(cut)
         last = cut
     return cuts

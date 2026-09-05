@@ -101,17 +101,24 @@ def _line_centered(t, W):
     return abs(xc - page_c) <= tol and w < 0.9 * W
 
 
-def _line_bold(t, img_gray, W, H, threshold_ratio=0.078):
+def _line_bold(t, img_gray, W, H, threshold_ratio=0.078, base_h=None):
     """用距离变换估算笔画粗细来判定是否加粗。
 
     密度法把"字大/颜色深/字密"都混进加粗，分不清"注/免责"(真粗) vs 正文(密但不粗)。
     改为：对单行文字做二值化→距离变换，取笔画中心处距离的高分位数作为笔画半径，
-    stroke_width=2×radius，再除以行高消除字号影响。粗体笔画更厚 → 相对粗细更大。
+    stroke_width=2×radius，再除以"字号尺度"消除字号影响。粗体笔画更厚 → 相对更粗。
 
     只用 scipy 的 distance_transform_edt（通用科学计算库），不引入 OpenCV(cv2)——
     避免与 macOS Vision 形成两套图像处理栈的重复。
-    threshold_ratio: 相对笔画粗细（stroke_width/行高）阈值。实测常规正文 ~0.075，
+
+    threshold_ratio: 相对笔画粗细（stroke_width/字号）阈值。实测常规正文 ~0.075，
         粗体 ~0.082+，默认 0.078 可区分；可按项目用 detect.bold_thickness_ratio 调。
+
+    base_h: 归一化用的"字号尺度"。默认取本行高 h；当 OCR 把同一视觉行拆成多段时
+        （如行尾两字被拆成独立行），各段 OCR bbox 高度不一，stroke/段高 会抖动，
+        加粗判定对同一行不一致。此时传页级基准（该页正文中位行高 body_h），
+        加粗 = 笔画绝对粗细 / 页面字号，与 OCR 段高无关——"注：…4号板块。"被拆成
+        "…4号板"+"块。" 两段仍能一致判粗。
     """
     x0 = max(0, int(t["x0"])); x1 = min(W, int(t["x1"]))
     y0 = max(0, int(t["y_top"])); y1 = min(H, int(t["y_bottom"]))
@@ -133,22 +140,30 @@ def _line_bold(t, img_gray, W, H, threshold_ratio=0.078):
     except Exception:
         return False
     stroke_width = radius * 2
-    relative = stroke_width / h
+    norm = (base_h if base_h else h)
+    if norm <= 0:
+        return False
+    relative = stroke_width / norm
     return relative > threshold_ratio
 
 
 def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
                      exclude_ranges=(), min_heading_ratio=1.28, global_body_h=None,
-                     bold_thickness_ratio=0.078):
+                     bold_thickness_ratio=0.078, plain_heading_ratio=1.18,
+                     page_heading_base=False, bold_base_h=None):
     """检测标题。
 
-    h_ratio 用全局正文基准 global_body_h 计算（跨页面统一），保证标题字号
-    与正文字号的比较在全书中稳定有效，而非受单页正文行高估算波动影响。
-    若未传 global_body_h，回退用本页 body_h。
+    h_ratio 默认用全局正文基准 global_body_h（跨页面统一）计算；page_heading_base=True
+    时改用本页 body_h——多张不同字号长图混排时，全书归一化行高中位数会被大字号图
+    主导，导致小字号图标题相对比例被稀释，此时应让标题与该页自己的正文比。
 
     min_heading_ratio: 彩色标题（`##`）的最小行高比例。真实标题字号明显大于正文
     （如"悖论系列N"1.31+/"第X章"1.29+），正文里独立成行的诗歌/脚注行字号接近
     正文（1.07~1.27×）。设 1.28 可过滤后者。可经 config `detect.min_heading_ratio` 调整。
+
+    plain_heading_ratio: 非彩色标题的最小行高比例（默认 1.18）。正文独立成行的
+    小标题/图表题字号略大但不悬殊；真正章节标题字号更突出。可经 config
+    `detect.heading_plain_ratio` 调整（长图文章标题常只比正文大 ~1.1×）。
 
     粗体标题（如长图顶部"（8.24~8.30）"/"8月周总结第3期"/"11:53 ③"）：
     行高可能并不明显大于正文（1.03×），但笔画明显更粗。作为补充，粗体且短、
@@ -156,13 +171,23 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
     注释/免责声明（"注：...。"、"本文仅为...入市需谨慎。"都以句号结尾）。
     """
     # global_body_h 传归一化正文行高中位数（跨页统一），换算成当前页像素：*H
-    base_h = (global_body_h * H) if global_body_h else body_h
+    if page_heading_base:
+        base_h = body_h
+    else:
+        base_h = (global_body_h * H) if global_body_h else body_h
     excl = [(e0 - 4, e1 + 4) for (e0, e1) in exclude_ranges]
     candidates = []
     bold_titles = set()  # 粗体标题候选（行高不足但笔画粗的短行）
     # 标题是短标题，正文段落（一整句）即使行高略大也不应被当标题。
     # 用最大字符数过滤：超过 max_heading_chars 视为正文（误判的长句不再当标题）。
     max_heading_chars = 40
+    # 页面最顶部文本行的 y_top：长图文章标题往往是该页/该片第一行，字号只比正文
+    # 大 ~1.1×（低于 1.18 通用阈值）。page_heading_base 时对"页面顶部首个文本"用
+    # 更低的 plain_heading_ratio，避免把正文里字号略大的行（如列表项）误判成标题。
+    _text_rows = [(l["y_top"], l["y_bottom"]) for l in px
+                  if l["text"].strip()
+                  and not FIG_RE.search(l["text"]) and not TBL_RE.search(l["text"])]
+    top_text_y = min((t for t, _ in _text_rows), default=0)
     for i, line in enumerate(px):
         if FIG_RE.search(line["text"]) or TBL_RE.search(line["text"]):
             continue
@@ -178,15 +203,23 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
             continue
         col = _line_text_color(img_rgb, line, W, H)
         sat = _col_sat(col) if col else 0.0
+        # 低行高阈值仅放宽给"页面顶部首个文本行"（长图文章标题常只比正文大 ~1.1×，
+        # 低于通用 1.18）；仅 page_heading_base=True（么瑞等多长图场景）时启用，
+        # 其余文本一律 >=1.18，防正文行/列表项误判为标题。
+        _is_top = page_heading_base and abs(line["y_top"] - top_text_y) < 0.5 * body_h
+        _eff_ratio = plain_heading_ratio if _is_top else 1.18
+        # 非彩色标题行高判定：elif 链保持"上一分支条件整体不满足才落到下一分支"，
+        # 低行高的粗体标题仍能落到最后的粗体分支。
         if col and sat > 0.25 and h_ratio >= min_heading_ratio \
                 and 0.10 * page_w < w <= 0.95 * page_w:
             candidates.append((i, 2))
-        elif (not col or sat < 0.35) and h_ratio >= 1.18 \
-                and 0.14 * page_w <= w <= 0.92 * page_w:
+        elif (not col or sat < 0.35) and h_ratio >= _eff_ratio \
+                and 0.14 * page_w <= w <= (0.96 if page_heading_base else 0.92) * page_w:
             candidates.append((i, 3))
         # 粗体标题（长图顶部文章标题等）：笔画粗但行高不足。粗体+短+不以句号结尾
         # +宽度适中 → 标题；正文里的加粗注释/免责声明以句号结尾被排除。
-        elif _line_bold(line, img_gray, W, H, bold_thickness_ratio) \
+        elif _line_bold(line, img_gray, W, H, bold_thickness_ratio,
+                        base_h=bold_base_h) \
                 and len(txt) <= 15 \
                 and not txt.endswith(("。", "！", "？")) \
                 and 0.08 * page_w < w <= 0.95 * page_w:
@@ -194,6 +227,14 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
             bold_titles.add(i)
     if not candidates:
         return {}
+
+    # 去重：同一行可能同时命中"行高(plain)"与"粗体"两条候选（各 append 一次），
+    # 只保留最高等级（level 数字小的优先，如 2 < 3），避免组内重复导致误拒。
+    _by_i: dict[int, int] = {}
+    for _i, _lv in candidates:
+        if _i not in _by_i or _lv < _by_i[_i]:
+            _by_i[_i] = _lv
+    candidates = list(_by_i.items())
 
     cands = sorted(candidates, key=lambda t: px[t[0]]["y_top"])
     groups = []
@@ -249,8 +290,29 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
     return result
 
 
-def _para_clusters(px, body_h, page_w):
-    tall = sorted([l for l in px if _is_tall(l, body_h) and l["w"] >= 0.12 * page_w],
+def _para_clusters(px, body_h, page_w, img_gray=None):
+    """几何聚类正文段（用于图区检测时把正文区域排除在"图内容"外）。
+
+    关键：**深色背景上的 OCR 行是图内文字（K线图白字/水印），不是正文**。
+    若把它们也判成正文段，_pass_b_regions 会把这些行从图内容里挖掉，导致图区被
+    截短、图内文字泄漏成正文（"图切出去了 + 又识别成文字"不应并存）。
+    故候选行若其包围盒内暗像素占比高（背景深色，如 >0.6），视为图内文字，跳过。
+    """
+    def _dark_ratio(l):
+        if img_gray is None:
+            return 0.0
+        x0 = max(0, int(l["x0"])); x1 = min(page_w, int(l["x1"]))
+        y0 = max(0, int(l["y_top"])); y1 = int(l["y_bottom"])
+        if x1 - x0 < 8 or y1 - y0 < 6:
+            return 0.0
+        reg = img_gray[y0:y1, x0:x1]
+        if reg.size == 0:
+            return 0.0
+        return float((reg < 200).mean())
+
+    tall = sorted([l for l in px
+                   if _is_tall(l, body_h) and l["w"] >= 0.12 * page_w
+                   and _dark_ratio(l) < 0.6],   # 跳过深色底(图内文字)
                   key=lambda l: l["y_top"])
     clusters = []
     cur = []
@@ -564,7 +626,9 @@ def _swap_in(tmp, dst):
 
 
 def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1.28,
-                  global_body_h=None, bold_thickness_ratio=0.078):
+                  global_body_h=None, bold_thickness_ratio=0.078,
+                  plain_heading_ratio=1.18, page_heading_base=True,
+                  bold_use_page_h=True, group_body_h=None):
     jpath = os.path.join(json_dir, f"{n}.json")
     ipath = os.path.join(img_dir, f"p{n}.jpg")
     if not os.path.exists(ipath):
@@ -580,14 +644,20 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1
     img_rgb = np.array(img.convert("RGB")).astype(np.float32)
     px = _lines_to_px(lines, W, H)
     body_h = _estimate_body_h(px)
-    paras = _para_clusters(px, body_h, W)
+    # 标题/加粗的字号基准：优先用该页所属长图组的像素正文行高中位（同组切片字号一致，
+    # 比单页 body_h 稳，p17/p28 这类"正文样本少"页不拖偏）；无组时回退本页 body_h。
+    font_base_h = group_body_h if (group_body_h and page_heading_base) else body_h
+    paras = _para_clusters(px, body_h, W, img_gray=img_gray)
 
     passA = _pass_a_regions(px, W, H, img_gray, body_h, paras, n=n)
-    heading_by_line = _detect_headings(px, body_h, W, img_rgb, img_gray, W, H,
+    heading_by_line = _detect_headings(px, font_base_h, W, img_rgb, img_gray, W, H,
                                        exclude_ranges=[(r[0], r[1]) for r in passA],
                                        min_heading_ratio=min_heading_ratio,
                                        global_body_h=global_body_h,
-                                       bold_thickness_ratio=bold_thickness_ratio)
+                                       bold_thickness_ratio=bold_thickness_ratio,
+                                       plain_heading_ratio=plain_heading_ratio,
+                                       page_heading_base=page_heading_base,
+                                       bold_base_h=(font_base_h if bold_use_page_h else None))
     heading_rows = [(px[i]["y_top"], px[i]["y_bottom"]) for i in heading_by_line]
     passB = _pass_b_regions(px, W, H, img_gray, body_h, paras, passA,
                             heading_rows, n=n)
@@ -659,7 +729,8 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1
         centered = bool(_line_centered(t, W))
         # 居中行多为图表标题/大字号落款，不是加粗；加粗判定对居中行豁免
         bold = (not centered) and bool(_line_bold(t, img_gray, W, H,
-                                                  bold_thickness_ratio))
+                                                  bold_thickness_ratio,
+                                                  base_h=(body_h if bold_use_page_h else None)))
         if i in heading_by_line:
             lv = heading_by_line[i]
             blocks.append({"type": "heading", "level": lv, "text": t["text"],
@@ -683,6 +754,70 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1
     return len(regions)
 
 
+def _group_body_h_map(json_dir, img_dir, pages):
+    """按"长图分组"计算各页统一的像素正文行高中位基准。
+
+    长图被切成多片后，同组切片**字号（像素）一致**但切片高 H 不同——OCR 归一化行高
+    h 是相对各自页高的，跨片不可直接比；像素行高 = h×H 才可比。这里把每页的像素
+    正文行高收集起来，按 long_image_pages.txt 的页分组，取**组内中位**作为该组所有
+    页共用的字号基准。
+
+    Returns:
+        {页号: 组像素正文行高中位}。只包含属于长图组的页；非长图页不含在返回里。
+    """
+    out = {}
+    try:
+        from .ocr import read_long_image_pages
+        import os as _os
+        # json_dir = <out>/ocr/pages_json，long_image_pages.txt 在 <out>/ 根
+        _out = _os.path.dirname(_os.path.dirname(_os.path.abspath(json_dir)))
+        groups = read_long_image_pages(_out)
+    except Exception:
+        groups = {}
+    # 页 → 所属长图组
+    page_group = {}
+    for _name, _ps in groups.items():
+        for _p in _ps:
+            page_group[_p] = _name
+    if not page_group:
+        return out
+
+    # 每页像素正文行高（h×H），仅用宽行近似正文
+    page_px_med = {}
+    for n in pages:
+        gname = page_group.get(n)
+        if gname is None:
+            continue
+        jp = os.path.join(json_dir, f"{n}.json")
+        if not os.path.exists(jp):
+            continue
+        try:
+            with open(jp, encoding="utf-8") as f:
+                dd = json.load(f)
+            ip = os.path.join(img_dir, f"p{n}.jpg")
+            if not os.path.exists(ip):
+                ip = os.path.join(img_dir, f"p{n}.png")
+            if not os.path.exists(ip):
+                continue
+            H = Image.open(ip).size[1]
+        except Exception:
+            continue
+        hs = [ln["h"] * H for ln in dd.get("lines", [])
+              if (ln.get("text") or "").strip()]
+        if hs:
+            page_px_med[n] = (gname, float(np.median(hs)))
+
+    # 组内聚合成组中位 → 组内每页共用
+    group_vals = {}
+    for n, (gname, med) in page_px_med.items():
+        group_vals.setdefault(gname, []).append(med)
+    group_med = {g: float(np.median(v)) for g, v in group_vals.items() if v}
+    for n, (gname, _med) in page_px_med.items():
+        if gname in group_med:
+            out[n] = group_med[gname]
+    return out
+
+
 def detect(project, img_dir, pages=None):
     """对项目执行布局检测。
 
@@ -702,10 +837,21 @@ def detect(project, img_dir, pages=None):
     # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27×）。设 1.28 过滤后者。
     # 可配置 detect.min_heading_ratio。
     from .config import Config
-    min_heading_ratio = float(Config(str(project.path)).get('detect.min_heading_ratio', 1.28))
+    _cfg = Config(str(project.path))
+    min_heading_ratio = float(_cfg.get('detect.min_heading_ratio', 1.28))
     # 加粗判定阈值（相对笔画粗细）。可配置 detect.bold_thickness_ratio。
-    bold_thickness_ratio = float(
-        Config(str(project.path)).get('detect.bold_thickness_ratio', 0.078))
+    bold_thickness_ratio = float(_cfg.get('detect.bold_thickness_ratio', 0.078))
+    # 非彩色标题最小行高比例（默认 1.18）。长图文章标题常只比正文大 ~1.1×，
+    # 需调低才能识别。可配置 detect.heading_plain_ratio。
+    plain_heading_ratio = float(_cfg.get('detect.heading_plain_ratio', 1.18))
+    # 标题行高基准：true(默认)=本页所属**长图组**的像素正文行高中位；false=全书归一化中位数。
+    # 长图被切成多片（同字号、切片高不同），归一化行高跨片不可比；多张不同字号长图混排时
+    # 全书基准又会被大字号图主导。按"页→长图分组"聚合同组切片的像素行高最稳。
+    page_heading_base = bool(_cfg.get('detect.heading_page_base', True))
+    # 加粗归一化：true(默认)=除以该页所属**长图组**的像素正文中位行高；false=除以本行 OCR 高。
+    # OCR 把同一视觉行拆成多段时各段高不同，除以段高会使加粗判定不一致；
+    # 用组级字号尺度归一化则加粗 = 笔画绝对粗细/组字号，与 OCR 段高无关。
+    bold_use_page_h = bool(_cfg.get('detect.bold_use_page_h', True))
 
     if not os.path.isdir(json_dir):
         raise SystemExit(f"错误：未找到 OCR 坐标目录 {json_dir}\n"
@@ -753,11 +899,24 @@ def detect(project, img_dir, pages=None):
     if pages is None:
         pages = _all_pages
     total = 0
+
+    # 长图组级字号基准：长图被切成多片（同字号、切片高不同），归一化行高跨片不可比；
+    # 只有把像素行高按"页→长图组"聚合成组中位，才是该组统一的字号尺度。
+    # 组内切片用同基准，避免单页正文样本少（p17/p28）导致字号估算波动。
+    # 非长图页（long_image_pages.txt 未记录）保持本页 body_h。
+    group_body_map = {}
+    if page_heading_base or bold_use_page_h:
+        group_body_map = _group_body_h_map(json_dir, img_dir, pages)
+
     for n in pages:
         r = _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp,
                           min_heading_ratio=min_heading_ratio,
                           global_body_h=global_body_h,
-                          bold_thickness_ratio=bold_thickness_ratio)
+                          bold_thickness_ratio=bold_thickness_ratio,
+                          plain_heading_ratio=plain_heading_ratio,
+                          page_heading_base=page_heading_base,
+                          bold_use_page_h=bold_use_page_h,
+                          group_body_h=group_body_map.get(n))
         if r:
             total += r
     _swap_in(blocks_tmp, blocks_dir)

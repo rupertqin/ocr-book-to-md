@@ -231,9 +231,22 @@ detect:
   bold_thickness_ratio: 0.078  # 加粗判定阈值（相对笔画粗细 = 笔画宽/行高）。
                       # 用 scipy 距离变换估算笔画粗细；实测常规正文 ~0.075、粗体 ~0.082+。
                       # 调高更严格（少判粗），调低更宽松（多判粗）。
-  middleware: ""       # blocks 中间件脚本（相对项目目录的 .py）。detect 产出 blocks 后、
-                      # text/layed 分流前运行，脚本须定义 process(blocks_dir, project_path)。
-                      #   仅配置它的项目生效（per-project 特别清理，如公众号头部多余信息）。
+  heading_plain_ratio: 1.18 # 非彩色标题最小行高比例。长图文章标题常只比正文大 ~1.1×，
+                      # 需调低（如 1.05）才能识别。默认 1.18 过滤正文独立成行的近等字号行。
+  heading_page_base: true   # 标题字号基准：true=按页所属长图组聚合的像素正文行高中位
+                      # （组内切片同字号；多张不同字号长图混排时，全书归一化中位数会被
+                      # 大字号图主导、稀释小字号图标题）。false=全书归一化中位数。
+  bold_use_page_h: true     # 加粗归一化：true=除以页所属长图组的像素正文中位行高；
+                      # false=除以本行 OCR 高。OCR 把同一视觉行拆成多段时各段 OCR 高度
+                      # 不一，除以段高会让加粗判定对同一行不一致；用组级字号归一化则
+                      # 加粗=笔画粗细/组字号，与 OCR 段高无关。
+  ocr_fix_global: true # 是否启用框架内置通用 OCR 纠错（ocr_fix.py GLOBAL_*，全 project
+                      # 共享同一 Vision 框架的形近字错）。false=本项目关闭通用纠错。
+  middlewares: []      # per-project OCR 中间件脚本列表（相对项目目录的 .py，按序执行）。
+                      # OCR 产出 pages_json 后、text/layed 分流前运行，脚本须定义
+                      # process(ocr_dir, project_path)。可混用清理（删头部等）与纠错
+                      # （修形近字）脚本，执行顺序即列表顺序。旧单键 middleware/ocr_fix
+                      # 仍兼容（middlewares 未配置时回退读取）。仅配置它的项目生效。
 
 # 全部流程（pipeline）最终 PDF 方式
 pipeline:

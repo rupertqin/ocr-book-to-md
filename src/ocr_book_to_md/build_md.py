@@ -36,36 +36,56 @@ def slugify(t):
 
 
 def _long_image_title(blocks_dir, first_page):
-    """取长图文章标题：按图片上的**视觉阅读顺序**拼接第一片顶部的标题块。
+    """取长图文章标题：对第一片顶部的文本块做**综合判断**识别标题区。
 
-    图片上的标题顺序是固定的（同一内容不管怎么切分/多宽都一样），OCR 只是把它
-    拆成一行或多块。这里不用 OCR 的块顺序，而按块的**视觉位置**排序：先按
-    y_top（行）、同一行内按 x0（从左到右），取第一组相邻标题行（文章主标题），
-    拼接为标题。这样结果只依赖图片排版，与 OCR 如何拆行无关——两张不同宽度同
-    内容截图会得到一致的标题。若无 heading 则返回空串。
+    不依赖 detect 的 heading 判定（heading 对长图常因行高/加粗边界漏判），而直接
+    分析第一片最顶部的文本块，用**多个信号综合**（单一信号都不是必须的）：
+
+      - 位置：标题在第一片最顶部（正文/小节标签之前，或紧随顶部元信息之后）；
+      - 字号：标题字号**不小于**页内正文行高中位（节标签/图表注字号明显更小）；
+      - 加粗：常加粗（加分项，字号显著大时非加粗也认）；
+      - 内容：不是时间戳（如"11:53 ③"）、不是节标签（以 `：` 结尾）。
+
+    图片上标题顺序固定，结果只依赖图片排版，与 OCR 拆行无关。
     """
     data = _load_blocks(blocks_dir, first_page)
     if not data:
         return ""
-    heads = [b for b in data if b.get("type") == "heading"]
-    if not heads:
+    blocks = [b for b in data
+              if b.get("type") in ("text", "heading") and (b.get("text") or "").strip()]
+    if not blocks:
         return ""
-    # 时间格式（如"11:53 ③"）是时间戳/元信息，不是文章标题，通用地过滤掉
-    heads = [b for b in heads
-             if not re.match(r"^\s*\d{1,2}:\d{2}", b.get("text", "").strip())]
-    if not heads:
+    # 页内正文行高中位数基准：用宽行（非节标签、非图注）的中位 h。
+    body_hs = [b["y_bottom"] - b["y_top"] for b in blocks
+               if not (b.get("text") or "").strip().endswith("：")]
+    if not body_hs:
         return ""
-    # 取第一组相邻标题行（文章主标题），忽略后续图表标题等
-    heads.sort(key=lambda b: b.get("y_top", 0))
-    group = [heads[0]]
-    for b in heads[1:]:
-        if b["y_top"] - group[0]["y_bottom"] < 130:
+    body_h = sorted(body_hs)[len(body_hs) // 2]  # 中位
+
+    # 按阅读序（y 升序）遍历，定位标题区：顶部连续的非时间戳、非节标签块，
+    # 字号 >= 正文中位（>=0.95×）或加粗，即综合判定为标题。
+    blocks.sort(key=lambda b: (b["y_top"], b.get("x0", 0)))
+    group = []
+    for b in blocks:
+        t = (b.get("text") or "").strip()
+        if re.match(r"^\s*\d{1,2}:\d{2}", t):
+            continue  # 时间戳/元信息
+        if t.endswith("："):
+            break    # 到第一个节标签（正文开始），标题区结束
+        h = b["y_bottom"] - b["y_top"]
+        is_bold = bool(b.get("bold"))
+        big = h >= body_h * 0.95
+        if is_bold or big:
+            if group and b["y_top"] - group[-1]["y_bottom"] > 1.6 * (group[-1]["y_bottom"] - group[-1]["y_top"] or 1):
+                break  # 与已收标题相距过大（如跳到正文），停止
             group.append(b)
-        else:
-            break
-    # 组内按**视觉位置**输出：同行(y_top 相近)按 x0 从左到右，行间按 y 从上到下。
-    # 这样标题顺序只依赖图片排版，与 OCR 把标题拆成几行/几块无关。
-    row_tol = max((b.get("y_bottom", 0) - b.get("y_top", 0) for b in group), default=20) * 0.6
+        elif group:
+            break  # 标题区结束：遇到既不加粗也不大的文本块
+    if not group:
+        return ""
+
+    # 组内按视觉位置输出：同行(y_top 相近)按 x0 从左到右，行间按 y 从上到下
+    row_tol = max((b["y_bottom"] - b["y_top"] for b in group), default=20) * 0.6
     rows = []
     for b in group:
         placed = False
@@ -404,19 +424,65 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
     skip_done = skip_title is None
     cur_para = []
     SENT_END = ("。", "！", "？")
-    # 跨页权威段落判定：基于合并后的阅读顺序，用纯文本标点（"上一行以句末标点
-    # 结尾 / 本行是节标签"）重算 para_start——detect 的 per-page 输出对切片首行
-    # 无上下文（i=0 默认 False），需在此处用真实的"前一行"修正。
+    # 跨页权威段落判定：基于合并后的阅读顺序，用"文本标点 + 同页垂直间距"重算段首。
+    #   - 文本标点：上一行以句末标点结尾 / 本行是节标签(以：结尾) → 段首。
+    #   - 垂直间距（仅长图 no_headings 用，且只在**同一页内**相邻文本之间可比）：
+    #     相邻文本块 gap/h 明显大于段内行距（OCR 拆行 gap/h≈0.2~0.6，段间距≈1.0+）
+    #     → 段首。detect per-page 输出对切片首行无上下文（i=0 默认 False），
+    #     故跨页处用"上一行是否句号"续判。
+    # 追踪"上一个同页文本行"的位置用于 gap/h；换页/图片打断后失效。
     prev_text = ""
+    prev_pg = None
+    prev_bot = None
+    prev_h = None
+
+    def _page_gap_is_para(n, b):
+        """同页且垂直间距明显(≥0.75×本行高) → 真段间距。仅长图模式启用。"""
+        if not no_headings or prev_pg is None or n != prev_pg:
+            return False
+        h = b["y_bottom"] - b["y_top"]
+        if h <= 0 or prev_bot is None:
+            return False
+        gap = b["y_top"] - prev_bot
+        return gap >= 0.75 * h
+
+    def _reset_pos():
+        nonlocal prev_pg, prev_bot, prev_h
+        prev_pg = None
+        prev_bot = None
+        prev_h = None
+
+    def _update_pos(n, b):
+        nonlocal prev_pg, prev_bot, prev_h
+        prev_pg = n
+        prev_bot = b["y_bottom"]
+        prev_h = b["y_bottom"] - b["y_top"]
+
+    def _flush_para():
+        """把 cur_para（列表元素 (text, bold)）组装成一段。
+        连续同加粗的行合并为一个 <strong>…</strong>，避免 OCR 把同一视觉行拆成多块
+        时输出 <strong>a</strong><strong>b</strong>（如"注：…板/块。"、免责声明跨行）。
+        """
+        if not cur_para:
+            return
+        runs = []
+        for txt, bld in cur_para:
+            if runs and runs[-1][1] == bld:
+                runs[-1][0] += txt
+            else:
+                runs.append([txt, bld])
+        out.append("".join(
+            f"<strong>{t}</strong>" if bld else t for t, bld in runs) + "\n\n")
+        cur_para.clear()
+
     for n, b in merged:
         if b["type"] == "image":
-            if cur_para:
-                out.append("".join(cur_para) + "\n\n")
-                cur_para = []
+            _flush_para()
             cap = b.get("caption", "").strip()
             alt = cap if cap else "插图"
             out.append(f"![{alt}](../figs/{b['file']})\n\n")
             prev_text = ""
+            _reset_pos()
             continue
         if b["type"] == "heading":
             if not skip_done and b["text"].strip() == skip_title:
@@ -427,44 +493,48 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
                 _bold = bool(b.get("bold"))
                 _centered = bool(b.get("centered"))
                 if bool(b.get("para_start")) and cur_para:
-                    out.append("".join(cur_para) + "\n\n")
-                    cur_para = []
+                    _flush_para()
                 if _centered:
-                    if cur_para:
-                        out.append("".join(cur_para) + "\n\n")
-                        cur_para = []
+                    _flush_para()
                     out.append(_fmt_line(b["text"], _bold, True) + "\n\n")
+                    _update_pos(n, b)
                 else:
-                    cur_para.append(_fmt_line(b["text"], _bold, False))
+                    cur_para.append([b["text"].strip(), _bold])
+                    _update_pos(n, b)
                 prev_text = b["text"].rstrip()
                 continue
-            if cur_para:
-                out.append("".join(cur_para) + "\n\n")
-                cur_para = []
+            _flush_para()
             level = b.get("level", 3)
             marker = "#" * level
             out.append(f"{marker} {b['text']}\n\n")
             prev_text = b["text"].rstrip()
+            _reset_pos()
             continue
         t = b["text"]
+        # 长图文章标题已作为 # 写入文件头：正文首个与标题相同的 text（标题行不是
+        # heading 而是普通加粗 text）也应跳过，避免 `# 标题` 后又重复一行标题。
+        if not skip_done and t.strip() == skip_title:
+            skip_done = True
+            prev_text = t.rstrip()
+            _update_pos(n, b)
+            continue
         bold = bool(b.get("bold"))
         centered = bool(b.get("centered"))
-        # 跨页权威 para_start：节标签 或 上一行是句末标点
+        # 段首判定：节标签 / 上一行句末标点 / 同页垂直间距明显
         is_label = t.strip().endswith("：")
-        para_start = is_label or (prev_text.endswith(SENT_END) if prev_text else False)
-        if para_start and cur_para:
-            out.append("".join(cur_para) + "\n\n")
-            cur_para = []
+        para_start = (is_label
+                      or (prev_text.endswith(SENT_END) if prev_text else False)
+                      or _page_gap_is_para(n, b))
+        if para_start:
+            _flush_para()
         if centered:
-            if cur_para:
-                out.append("".join(cur_para) + "\n\n")
-                cur_para = []
+            _flush_para()
             out.append(_fmt_line(t, bold, centered) + "\n\n")
         else:
-            cur_para.append(_fmt_line(t, bold, False))
+            cur_para.append([t, bold])
         prev_text = t.rstrip()
-    if cur_para:
-        out.append("".join(cur_para) + "\n\n")
+        _update_pos(n, b)
+    _flush_para()
     return "".join(out)
 
 
