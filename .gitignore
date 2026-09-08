@@ -12,5 +12,8 @@ build/
 dist/
 .venv/
 
+# 测试运行时导出的合成图（便于人工查看真实效果，不入库）
+tests/_generated/
+
 # 其他
 .DS_Store

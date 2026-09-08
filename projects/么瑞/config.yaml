@@ -1,6 +1,6 @@
 book:
   name: 么瑞
-  images_dir: data/images
+  images_dir: assets
   start_page: null
   end_page: null
   force_ocr: false
@@ -8,13 +8,9 @@ book:
 detect:
   min_heading_ratio: 1.28
   bold_thickness_ratio: 0.082
-  # heading_page_base / bold_use_page_h 默认已为 true（按长图组聚合像素字号基准），无需配置
-  # per-project OCR 中间件（按序执行）：
-  #   1. clean_ocr.py 清理头部多余行（已付费/作者署名/时间戳）
-  #   2. fix_ocr.py   修正 OCR 形近字错词
   middlewares:
-    - hooks/clean_ocr.py
-    - hooks/fix_ocr.py
+  - hooks/clean_ocr.py
+  - hooks/fix_ocr.py
 pipeline:
   pdf: layed
 pdf:

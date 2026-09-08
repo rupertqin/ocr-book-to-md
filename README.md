@@ -50,7 +50,7 @@ ocr-book-to-md/
     └── <书名>/
         ├── config.yaml           # 项目配置（唯一配置来源）
         ├── .env                  # 敏感信息
-        ├── data/images/          # 输入截图
+        ├── assets/          # 输入截图
         └── output/               # 全部产物
             ├── ocr/              # ① OCR 产物
             ├── blocks/           # ② 布局中间产物
@@ -66,10 +66,10 @@ ocr-book-to-md/
 ## 快速开始（一键）
 
 ```bash
-# 1. 初始化项目（生成 config.yaml + .env + data/images/）
+# 1. 初始化项目（生成 config.yaml + .env + assets/）
 python main.py init -p ./projects/进化心理学
 
-# 2. 把书的截图放入 projects/进化心理学/data/images/
+# 2. 把书的截图放入 projects/进化心理学/assets/
 
 # 3. 一键全流程（最终 PDF 方式默认 text，也可 --pdf img/layed）
 python main.py pipeline -p ./projects/进化心理学
@@ -211,7 +211,7 @@ python main.py pipeline -p ./projects/<书名> --pdf text
 ├── cover.jpg      # 封面（第一页，可选）
 ├── p1.png / p2.png / p3.png ...
 
-# 仅生成原图片 PDF（默认用项目 data/images；也可用 -i 指定别的目录）
+# 仅生成原图片 PDF（默认用项目 assets；也可用 -i 指定别的目录）
 python main.py pdf -p ./projects/<书名> --type img
 python main.py pdf -p ./projects/<书名> --type img -i ./页面图目录
 python main.py pdf -p ./projects/<书名> --type img --no-pdf   # 只准备结构不生成
@@ -276,7 +276,7 @@ pdf:
 ```yaml
 book:
   name: "进化心理学"       # 书名（默认取项目目录名）
-  images_dir: "data/images"  # 截图目录（相对项目目录解析，默认 data/images）
+  images_dir: "assets"  # 截图目录（相对项目目录解析，默认 assets）
   start_page: null        # 起始页（默认自动探测）
   end_page: null          # 结束页（默认自动探测）
   force_ocr: false        # 忽略 OCR 缓存，强制重跑
@@ -346,7 +346,7 @@ from document_factory.pdf_generator import create_pdf
 ```
 
 ```bash
-# 一键：图片 → PDF（默认用项目的 data/images；也可在 config 配 book.images_dir）
+# 一键：图片 → PDF（默认用项目的 assets；也可在 config 配 book.images_dir）
 python main.py pdf -p ./projects/影印本 --type img
 
 # 从别的目录生成（-i 可覆盖默认图片目录）
@@ -356,7 +356,7 @@ python main.py pdf -p ./projects/影印本 --type img -i ./页面图目录
 python main.py pdf -p ./projects/影印本 --type img --no-pdf
 ```
 
-> `-i/--images` 参数可选：图片目录优先级为 `-i 命令行 > config.book.images_dir > 项目 data/images`。图片放在项目 `data/images/` 下（或配置好 `book.images_dir`）时，可完全省略 `-i`。
+> `-i/--images` 参数可选：图片目录优先级为 `-i 命令行 > config.book.images_dir > 项目 assets`。图片放在项目 `assets/` 下（或配置好 `book.images_dir`）时，可完全省略 `-i`。
 
 实现原理：
 1. 扫描图片目录，`cover.jpg`（或 `cover.png`）作为封面，其余图片按页号排序；
@@ -482,6 +482,6 @@ pip install document-factory
 
 ```bash
 python main.py init -p ./projects/进化心理学
-# 把 data/images 的截图放入 projects/进化心理学/data/images/
+# 把 assets 的截图放入 projects/进化心理学/assets/
 python main.py pipeline -p ./projects/进化心理学
 ```

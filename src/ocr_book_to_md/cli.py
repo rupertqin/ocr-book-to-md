@@ -38,7 +38,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 命令:
-  init     初始化项目（生成 config.yaml + .env + data/images/）
+  init     初始化项目（生成 config.yaml + .env + assets/）
   ocr      ① OCR（Swift macOS Vision）→ output/ocr/
   detect   ② 布局分析 → output/blocks + output/figs
   build    ③ 组装章节 → output/md + output/content/article_N.md
@@ -65,10 +65,16 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     init_p = subparsers.add_parser('init', help='初始化项目')
     init_p.add_argument('-p', '--project', default='.', help='项目目录（默认: 当前目录）')
 
+    # pdftotext：assets 里 .pdf 有文字层则直取为 markdown（免 OCR）
+    pdft_p = subparsers.add_parser('pdftotext', help='PDF 文字层 → markdown（免 OCR）')
+    pdft_p.add_argument('-p', '--project', default='.', help='项目目录')
+    pdft_p.add_argument('--dpi', type=int, default=150, help='嵌图渲染分辨率（默认 150）')
+    pdft_p.add_argument('--out', default=None, help='输出目录（默认 output/pdf_text/）')
+
     # ocr
     ocr_p = subparsers.add_parser('ocr', help='OCR 步骤')
     ocr_p.add_argument('-p', '--project', default='.', help='项目目录')
-    ocr_p.add_argument('--images', default=None, help='截图目录（默认 config.yaml 的 book.images_dir 或 data/images）')
+    ocr_p.add_argument('--images', default=None, help='输入素材目录（默认 config.yaml 的 book.images_dir 或 assets/）')
     ocr_p.add_argument('--start', type=int, default=None, help='起始页')
     ocr_p.add_argument('--end', type=int, default=None, help='结束页')
     ocr_p.add_argument('-f', '--force', action='store_true', default=None, help='忽略缓存（OCR 缓存，重跑全部页）')
@@ -99,7 +105,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     pdf_p.add_argument('--letter-spacing', default=None, help='CSS letter-spacing（layed 用）')
     pdf_p.add_argument('--punct-compress', default=None, help='标点压缩 CSS 值（layed 用）')
     # img 专用
-    pdf_p.add_argument('--images', default=None, help='图片目录（img 用，默认 data/images，封面 cover.jpg）')
+    pdf_p.add_argument('--images', default=None, help='图片目录（img 用，默认 assets/，封面 cover.jpg）')
     pdf_p.add_argument('--title', default=None, help='PDF 标题（img 用，默认书名）')
     pdf_p.add_argument('--no-pdf', action='store_true', help='只准备结构不生成（img 用）')
     pdf_p.add_argument('pages', nargs='*', type=int, help='仅渲染指定页（layed 调试用）')
@@ -148,7 +154,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
             config.write_default()
         config.write_env_template()
         print(f"✓ 已初始化项目: {project.path}")
-        print(f"  请把书的截图放入 {project.images_dir}/")
+        print(f"  请把书的截图或 PDF 放入 {project.get_input_dir()}/")
         print(f"  然后在 {config.config_file} 配置 book.name 等")
         return
 
@@ -157,9 +163,40 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         sys.exit(1)
     project.ensure()
 
+    if args.command == 'pdftotext':
+        from . import pdfsource
+        from pathlib import Path as _P
+        inp = config.get_images_dir() or str(project.get_input_dir())
+        pdfs = pdfsource.find_pdfs(inp)
+        if not pdfs:
+            print(f"目录 {inp} 里没有 .pdf")
+            return
+        out_dir = _P(args.out) if args.out else project.output_dir / "pdf_text"
+        img_dir = out_dir / "images"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        img_dir.mkdir(parents=True, exist_ok=True)
+        n_ok = n_skip = 0
+        for pdf in pdfs:
+            pdf_path = os.path.join(inp, pdf)
+            md = pdfsource.pdf_to_markdown(pdf_path, str(img_dir),
+                                           dpi=args.dpi)
+            if not md:
+                print(f"  [跳过-无文字层] {pdf}（纯图/扫描，用渲染 OCR 流程）")
+                n_skip += 1
+                continue
+            stem = os.path.splitext(pdf)[0]
+            # 清理标题里含 / 的文件名隐患：用文章内部标题
+            out_md = out_dir / f"{stem}.md"
+            with open(out_md, "w", encoding="utf-8") as f:
+                f.write(md)
+            n_ok += 1
+            print(f"  ✓ {pdf} → {out_md.name}")
+        print(f"\npdftotext：{n_ok} 篇文字层直取成功，{n_skip} 篇无文字层（建议走渲染 OCR）")
+        return
+
     if args.command == 'ocr':
         from . import ocr as ocr_mod
-        images = args.images or config.get_images_dir() or str(project.images_dir)
+        images = args.images or config.get_images_dir() or str(project.get_input_dir())
         force = args.force
         if force is None:
             force = config.get_force_ocr()
@@ -178,7 +215,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         # detect 默认用预处理 JPEG 目录；若原图就是 pN.png 命名且非真 PNG，可用原图
         images = args.images
         if not images:
-            images = config.get_images_dir() or str(project.images_dir)
+            images = config.get_images_dir() or str(project.get_input_dir())
         # 优先用 OCR 预处理后的 JPEG 目录（统一 pN.jpg，规避 PNG SIGBUS）
         # OCR 中间件 + 纠错钩子（per-project）：先清理 pages_json，再修正 OCR 错字，
         # 之后 detect 才产干净 blocks
@@ -209,7 +246,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
 
     if _pdf_type == 'img':
         from . import imgpdf as imgpdf_mod
-        images = args.images or config.get_images_dir() or str(project.images_dir)
+        images = args.images or config.get_images_dir() or str(project.get_input_dir())
         imgpdf_mod.make_imgpdf(project, images, book_name=args.title,
                                no_pdf=args.no_pdf)
         return
@@ -239,7 +276,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         from . import layedpdf as layed_mod
         from . import imgpdf as imgpdf_mod
 
-        images = args.images or config.get_images_dir() or str(project.images_dir)
+        images = args.images or config.get_images_dir() or str(project.get_input_dir())
         force = args.force
         if force is None:
             force = config.get_force_ocr()

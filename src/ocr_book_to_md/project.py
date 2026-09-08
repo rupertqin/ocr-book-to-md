@@ -5,7 +5,8 @@
     projects/<书名>/
     ├── config.yaml          # 项目配置（唯一配置来源）
     ├── .env                 # 敏感信息
-    ├── data/images/         # 输入截图
+    ├── assets/              # 输入素材：截图（png/jpg…）或 PDF（.pdf，自动渲染成页图/提取文字）
+    │   └── (历史 data/images/ 仍兼容，config book.images_dir 可覆盖)
     └── output/              # 全部产物
         ├── ocr/             # ① OCR 产物
         ├── blocks/          # ② 布局中间产物
@@ -24,6 +25,8 @@ class Project:
         self.path = Path(path).resolve()
         self.config_file = self.path / "config.yaml"
         self.env_file = self.path / ".env"
+        self.assets_dir = self.path / "assets"
+        # 兼容：历史项目用 data/images，config book.images_dir 可显式覆盖
         self.data_dir = self.path / "data"
         self.images_dir = self.path / "data" / "images"
         self.output_dir = self.path / "output"
@@ -34,9 +37,17 @@ class Project:
     def exists(self) -> bool:
         return self.path.exists()
 
+    def get_input_dir(self) -> Path:
+        """输入素材目录：优先 assets，历史 data/images 存在时兼容回退。"""
+        if self.assets_dir.is_dir() and any(self.assets_dir.iterdir()):
+            return self.assets_dir
+        if self.images_dir.is_dir():
+            return self.images_dir
+        return self.assets_dir
+
     def ensure(self) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
-        self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- output 子目录 ----

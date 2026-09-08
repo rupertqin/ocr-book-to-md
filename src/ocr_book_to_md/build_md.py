@@ -17,6 +17,30 @@ import shutil
 CN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
       "七": 7, "八": 8, "九": 9, "十": 10}
 
+# 有序列表项：行首"数字+分隔符(半角点/全角点/顿号/括号)+内容"，如 "1. 投多少？"。
+# 分隔符后可直接接中文（全角．后常无空格）；但不能接数字/小数点（排除 3.5倍、1.2节）。
+# 全角点 ． 不是标准 md 有序列表标记，识别后统一输出半角点。
+OL_RE = re.compile(r"^\s*(\d{1,2})\s*[.．、)）]\s*([^0-9\s].*)$")
+# 无序列表项：行首 bullet（半角 - / 全角 •·▪）
+UL_RE = re.compile(r"^\s*[-•·▪●]\s+(.+)$")
+
+
+def _is_list_item(t):
+    """识别一行是否列表项。返回 ('ol', 序号, 内容) / ('ul', None, 内容) / None。
+
+    有序列表项需是**行首数字编号**（如 "1. xxx" / "3．xxx" / "2、xxx"）。
+    排除正文里以数字开头的普通行：正文行通常铺满版心且不以编号格式出现。
+    """
+    if not t:
+        return None
+    m = OL_RE.match(t)
+    if m:
+        return ("ol", int(m.group(1)), m.group(2).strip())
+    m = UL_RE.match(t)
+    if m:
+        return ("ul", None, m.group(1).strip())
+    return None
+
 
 def cn2int(s):
     if not s:
@@ -62,26 +86,64 @@ def _long_image_title(blocks_dir, first_page):
         return ""
     body_h = sorted(body_hs)[len(body_hs) // 2]  # 中位
 
-    # 按阅读序（y 升序）遍历，定位标题区：顶部连续的非时间戳、非节标签块，
-    # 字号 >= 正文中位（>=0.95×）或加粗，即综合判定为标题。
+    # 按阅读序（y 升序）遍历。先跳过时间戳，看页首第一个"内容块"：
     blocks.sort(key=lambda b: (b["y_top"], b.get("x0", 0)))
+    content = [b for b in blocks
+               if (b.get("text") or "").strip()
+               and not re.match(r"^\s*\d{1,2}:\d{2}",
+                                (b.get("text") or "").strip())]
+    if not content:
+        return ""
+    first = content[0]
+    first_t = (first.get("text") or "").strip()
+    # 情形 B：标题是"居中短行"（公众号/长图顶部文章题常见样式：字号与正文相近、
+    # 但页面最顶部、居中、独立一行），不依赖大字/加粗。若首块居中且较短 → 即标题。
+    if first.get("centered") and 0 < len(first_t) <= 32 \
+            and not first_t.endswith("："):
+        return first_t
+
+    # 情形 A：标题靠大字号/加粗。从页首起收集"标题行"（连续大字/加粗行）。
+    # 判定要点：
+    #  - 首行显著大于正文中位(≥1.15×)才是大字标题；
+    #  - 后续行须与首行字号接近（回落 ≤10%）才并入——否则说明是标题下方的
+    #    摘要/正文段(即使整段加粗，如"摘要：…"学术文摘)，标题区就此结束。
+    #  - 连续多行标题(排版拆行)行高接近，不受影响。
     group = []
-    for b in blocks:
+    first_h = None
+    limit_lines = 1
+    for b in content:
         t = (b.get("text") or "").strip()
-        if re.match(r"^\s*\d{1,2}:\d{2}", t):
-            continue  # 时间戳/元信息
         if t.endswith("："):
             break    # 到第一个节标签（正文开始），标题区结束
         h = b["y_bottom"] - b["y_top"]
         is_bold = bool(b.get("bold"))
         big = h >= body_h * 0.95
         if is_bold or big:
-            if group and b["y_top"] - group[-1]["y_bottom"] > 1.6 * (group[-1]["y_bottom"] - group[-1]["y_top"] or 1):
-                break  # 与已收标题相距过大（如跳到正文），停止
+            if group and (h < first_h * 0.9
+                          or b["y_top"] - group[-1]["y_bottom"]
+                          > 1.6 * (group[-1]["y_bottom"] - group[-1]["y_top"] or 1)):
+                break  # 行高回落(标题与摘要/正文的分界) / 垂直间距拉大 → 停
+            if not group:
+                first_h = h
+                # 收首行后才决定"行数上限"
+                limit_lines = 3 if first_h >= body_h * 1.15 else 1
             group.append(b)
+            if len(group) > limit_lines:
+                # 超过 1 行/3 行：前 N 行是标题，多余是正文
+                group.pop()
+                break
         elif group:
             break  # 标题区结束：遇到既不加粗也不大的文本块
     if not group:
+        return ""
+    # group 首行上方若已存在普通正文（非粗、非居中、非时间戳）→ group 不是
+    # 页面最顶部的标题，而是正文中途被误判的大字行 → 不给标题。
+    for pre in content:
+        if pre["y_top"] >= group[0]["y_top"]:
+            break
+        pre_t = (pre.get("text") or "").strip()
+        if not pre_t or pre.get("centered") or pre.get("bold"):
+            continue
         return ""
 
     # 组内按视觉位置输出：同行(y_top 相近)按 x0 从左到右，行间按 y 从上到下
@@ -380,9 +442,14 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
     # 使标题文本顺序与图片一致，与 OCR 拆行无关；拼接不加空格。
     merged = []
     for n, b in all_blocks:
+        # 仅合并"同层级的连续标题行"：标题(通常居左/非居中)与其后独立的作者署名行
+        # (居中"知乎：…")不合并——否则标题文本会被署名污染, 无法与文件头标题做 skip。
+        _same_align = (merged[-1][1].get("centered") == b.get("centered")) \
+            if (merged and merged[-1][1]["type"] == "heading") else False
         if (b["type"] == "heading" and merged and merged[-1][1]["type"] == "heading"
                 and merged[-1][1]["level"] == b["level"]
-                and b["y_top"] - merged[-1][1]["y_bottom"] < 130):
+                and b["y_top"] - merged[-1][1]["y_bottom"] < 130
+                and _same_align):
             # 并入当前 heading 组
             cur = merged[-1][1]
             cur["_group"].append(b)
@@ -458,29 +525,165 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
         prev_bot = b["y_bottom"]
         prev_h = b["y_bottom"] - b["y_top"]
 
+    # 通用列表识别状态：检测"连续编号行/同 bullet 行"并把它们输出为 markdown 列表。
+    # 有序项(1./2./3. 或 1．2．3. 或 1、2、3)与无序项(- • ·)都会识别；
+    # 编号标点统一为半角（`3．`→`3.`），markdown 预览缩进一致。
+    pending_list = []
+    pending_kind = None       # 'ol' / 'ul'
+    pending_prev_num = None
+
+    def _flush_pending_list():
+        nonlocal pending_list, pending_kind, pending_prev_num
+        if pending_list:
+            out.append("\n".join(pending_list) + "\n\n")
+        pending_list = []
+        pending_kind = None
+        pending_prev_num = None
+
+    def _emit_list_or_para(plain, styled_html):
+        """把一段文本输出：若它是列表项则并入 pending_list（连续同类项同列表），
+        否则先冲刷 pending_list 再按普通段落输出。styled_html 为 None 表示纯文本。"""
+        nonlocal pending_kind, pending_prev_num
+        s = (plain or "").strip()
+        item = None
+        m = OL_RE.match(s) if s else None
+        if m and styled_html is None:
+            item = ("ol", int(m.group(1)), m.group(2).strip())
+        else:
+            m = UL_RE.match(s) if s else None
+            if m and styled_html is None:
+                item = ("ul", None, m.group(1).strip())
+        if item is None:
+            _flush_pending_list()
+            if styled_html is None:
+                out.append(s + "\n\n")
+            else:
+                out.append(styled_html + "\n\n")
+            return
+        kind, num, content = item
+        if kind == "ol":
+            line = f"{num}. {content}"
+        else:
+            line = f"- {content}"
+        # 与上一个列表项同类且(有序编号连续 or 无序) → 并入同一列表
+        if pending_kind == kind and (
+                kind == "ul" or (num == (pending_prev_num or 0) + 1)):
+            pending_list.append(line)
+            pending_prev_num = num
+            return
+        # 不连续（编号跳跃 / 类型变化）→ 新起一段列表
+        _flush_pending_list()
+        pending_kind = kind
+        pending_list.append(line)
+        pending_prev_num = num
+
+    def _push_text_segments(b, txt, bold, use_strip=True):
+        """把一段文本（可能行内含多色 color_spans）切分后追加进 cur_para。
+
+        行内混色（detect 的 color_spans=[{s,e,color_rgb,color_name}]，s/e 为字符
+        区间）：黑段 col=None、彩色段用其标准色，逐段 append；_flush_para 合并
+        相邻同色段，最终输出"行内多个 <span>"而非整行一色。
+        """
+        spans = b.get("color_spans") or []
+        if not spans:
+            _use = txt.strip() if use_strip else txt
+            if b.get("color_hue") is not None and b.get("color_rgb"):
+                col = (b["color_rgb"], b.get("color_name"))
+            else:
+                col = None
+            if _use:
+                cur_para.append([_use, bold, col])
+            return
+        # 有 spans：不 strip（保证字符索引与 spans 对齐）
+        segs = []
+        prev = 0
+        n = len(txt)
+        for sp in sorted(spans, key=lambda x: x["s"]):
+            s = max(0, int(sp.get("s", 0)))
+            e = min(n - 1, int(sp.get("e", 0)))
+            if s > prev:
+                segs.append((txt[prev:s], None))
+            segs.append((txt[s:e + 1],
+                         (sp["color_rgb"], sp.get("color_name"))))
+            prev = e + 1
+        if prev < n:
+            segs.append((txt[prev:], None))
+        for seg, col in segs:
+            seg = seg.strip()
+            if seg:
+                cur_para.append([seg, bold, col])
+
     def _flush_para():
-        """把 cur_para（列表元素 (text, bold)）组装成一段。
-        连续同加粗的行合并为一个 <strong>…</strong>，避免 OCR 把同一视觉行拆成多块
-        时输出 <strong>a</strong><strong>b</strong>（如"注：…板/块。"、免责声明跨行）。
+        """把 cur_para（元素 (text, bold, color_rgb)）组装成一段。
+        连续同加粗且同色的行合并为一个 run；run 整体按 bold/颜色上样
+        （<strong> / <span style="color:#xxxxxx">），避免 OCR 把同一视觉行拆成
+        多块时输出 <strong>a</strong><strong>b</strong>（如"注：…板/块。"）。
+
+        若该段是"列表项"（行首编号/bullet）且为纯文本 → 走 _emit_list_or_para
+        归入通用列表；带样式(加粗/彩色)的段落按普通文本输出（保留样式）。
         """
         if not cur_para:
             return
         runs = []
-        for txt, bld in cur_para:
-            if runs and runs[-1][1] == bld:
+        for txt, bld, col in cur_para:
+            if runs and runs[-1][1] == bld and runs[-1][2] == col:
                 runs[-1][0] += txt
             else:
-                runs.append([txt, bld])
-        out.append("".join(
-            f"<strong>{t}</strong>" if bld else t for t, bld in runs) + "\n\n")
+                runs.append([txt, bld, col])
+        has_style = any(bld or col for _, bld, col in runs)
+        parts = []
+        for t, bld, col in runs:
+            s = t
+            if col:
+                # col=(rgb, name)。语义标准色优先输出名称（如 red/pink）；无则 hex
+                _val = col[1] if col[1] else "#%02x%02x%02x" % tuple(col[0][:3])
+                s = f'<span style="color:{_val}">{s}</span>'
+            if bld:
+                s = f"<strong>{s}</strong>"
+            parts.append(s)
+        plain = "".join(txt for txt, _, _ in cur_para)
+        _emit_list_or_para(plain, None if not has_style else "".join(parts))
         cur_para.clear()
+
+    def _md_table(b):
+        rows = b.get("rows") or []
+        if not rows:
+            return ""
+        ncol = max(len(r) for r in rows)
+        def _cell_text(c):
+            t = (c.get("text") or "").strip() if isinstance(c, dict) else str(c).strip()
+            col = c.get("color_rgb") if isinstance(c, dict) else None
+            if col:
+                nm = c.get("color_name") if isinstance(c, dict) else None
+                _val = nm if nm else "#%02x%02x%02x" % tuple(col[:3])
+                t = f'<span style="color:{_val}">{t}</span>'
+            t = t.replace("|", "\\|")
+            return t
+        def _line(cells):
+            cells = cells + [""] * (ncol - len(cells))
+            return "| " + " | ".join(_cell_text(c) for c in cells) + " |"
+        lines = [_line(rows[0])]
+        lines.append("| " + " | ".join("---" for _ in range(ncol)) + " |")
+        for r in rows[1:]:
+            lines.append(_line(r))
+        return "\n".join(lines) + "\n\n"
 
     for n, b in merged:
         if b["type"] == "image":
             _flush_para()
+            _flush_pending_list()
             cap = b.get("caption", "").strip()
             alt = cap if cap else "插图"
             out.append(f"![{alt}](../figs/{b['file']})\n\n")
+            prev_text = ""
+            _reset_pos()
+            continue
+        if b["type"] == "table":
+            _flush_para()
+            _flush_pending_list()
+            _mdt = _md_table(b)
+            if _mdt:
+                out.append(_mdt)
             prev_text = ""
             _reset_pos()
             continue
@@ -492,18 +695,51 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
             if no_headings:
                 _bold = bool(b.get("bold"))
                 _centered = bool(b.get("centered"))
-                if bool(b.get("para_start")) and cur_para:
+                _t = b["text"]
+                # skip_title 匹配——若合并后 heading 文本以标题开头, 剥除前缀输出剩余;
+                # 解决 heading 合并把"居中标题+居中节标签"粘成 "标题写在前面" 而跳不过的 bug。
+                if not skip_done and _t.startswith(skip_title):
+                    rest = _t[len(skip_title):].lstrip()
+                    skip_done = True
+                    if not rest:
+                        prev_text = _t.rstrip()
+                        _update_pos(n, b)
+                        continue
+                    # 把剩余部分当成独立 heading 输出(保留居中/加粗)
+                    if _centered:
+                        _flush_para()
+                        _flush_pending_list()
+                        out.append(_fmt_line(rest, _bold, True) + "\n\n")
+                    else:
+                        _push_text_segments(b, rest, _bold, use_strip=True)
+                    prev_text = rest.rstrip()
+                    _update_pos(n, b)
+                    continue
+                _ci = _is_list_item(_t)
+                _is_label_h = _t.strip().endswith("：")
+                # 段首判定：与 text 分支一致——以 detect 的 para_start 为主（标点+节标签
+                # 文本驱动）, 跨页/切片首行用 prev_text 句末标点补判。
+                para_start = (bool(b.get("para_start", False))
+                              or _is_label_h
+                              or (prev_text.rstrip().endswith("：") and _ci is not None)
+                              or (prev_text.endswith(SENT_END) if prev_text else False))
+                if para_start and cur_para:
                     _flush_para()
+                    _flush_pending_list()
                 if _centered:
                     _flush_para()
-                    out.append(_fmt_line(b["text"], _bold, True) + "\n\n")
+                    _flush_pending_list()
+                    out.append(_fmt_line(_t, _bold, True) + "\n\n")
                     _update_pos(n, b)
                 else:
-                    cur_para.append([b["text"].strip(), _bold])
+                    # 仅真正彩色（有明确色相）上色；黑/灰正文不上；
+                    # 行内混色(color_spans)由 _push_text_segments 按段处理
+                    _push_text_segments(b, _t, _bold, use_strip=True)
                     _update_pos(n, b)
-                prev_text = b["text"].rstrip()
+                prev_text = _t.rstrip()
                 continue
             _flush_para()
+            _flush_pending_list()
             level = b.get("level", 3)
             marker = "#" * level
             out.append(f"{marker} {b['text']}\n\n")
@@ -520,21 +756,31 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
             continue
         bold = bool(b.get("bold"))
         centered = bool(b.get("centered"))
-        # 段首判定：节标签 / 上一行句末标点 / 同页垂直间距明显
         is_label = t.strip().endswith("：")
-        para_start = (is_label
-                      or (prev_text.endswith(SENT_END) if prev_text else False)
-                      or _page_gap_is_para(n, b))
+        _cur_item = _is_list_item(t)
+        # 段首判定：优先用 detect 的 para_start（标点+节标签文本驱动, 在长图
+        # 行距大(gap/h≈0.94)的截图上仍可靠——而旧版的 gap>=0.75h 阈值会把
+        # 每行当段首造成"每行独立段"伪断裂）。跨页/切片首行 detect 拿不到上行
+        # 上下文默认 False, 用 prev_text 句末标点补判。
+        para_start = (bool(b.get("para_start", False))
+                      or is_label
+                      or (prev_text.rstrip().endswith("：") and _cur_item is not None)
+                      or (prev_text.endswith(SENT_END) if prev_text else False))
         if para_start:
             _flush_para()
         if centered:
             _flush_para()
+            _flush_pending_list()
             out.append(_fmt_line(t, bold, centered) + "\n\n")
         else:
-            cur_para.append([t, bold])
+            # 仅真正彩色（有明确色相）上色；黑/灰正文不上。
+            # 行内混色(color_spans)由 _push_text_segments 按段处理；
+            # 无混色时仍保持原 append(t) 语义（不 strip，保留 OCR 原文）。
+            _push_text_segments(b, t, bold, use_strip=False)
         prev_text = t.rstrip()
         _update_pos(n, b)
     _flush_para()
+    _flush_pending_list()
     return "".join(out)
 
 

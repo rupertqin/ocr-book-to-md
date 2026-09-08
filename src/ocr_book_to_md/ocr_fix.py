@@ -53,6 +53,59 @@ def _apply_word_fixes(t, word_fixes):
     return new
 
 
+def _filter_watermark_lines(data, log, h_ratio=4.0, max_len=12):
+    """按行高特征滤除"斜排水印"误识行（Vision 对斜排半透明水印会给异常大的
+    bbox：行高是正文行高的数倍甚至 10+ 倍，且文本短、无句读）。返回滤除行数。
+
+    判定（全部满足才滤）：
+      - 该行 h ≥ h_ratio × 页正文行高(h 中位)——正文行高差异小，中位稳；
+      - 文本短（≤max_len）且不是数字/时间戳、不以句号/冒号结尾；
+      - 同页中与它相似的水印文本反复出现（水印整页平铺）或文本是重复短词
+        （斜排水印常被拆成"闲鱼嘘嘘敦敦"这类无意义短词）。
+    """
+    lines = data.get("lines", [])
+    if not lines:
+        return 0
+    hs = [ln.get("h", 0) for ln in lines if (ln.get("text") or "").strip()]
+    if not hs:
+        return 0
+    med_h = float(sorted(hs)[len(hs) // 2])
+    if med_h <= 0:
+        return 0
+    import re as _re
+    text_cnt = {}
+    for ln in lines:
+        t = (ln.get("text") or "").strip()
+        if t:
+            text_cnt[t] = text_cnt.get(t, 0) + 1
+    kept = []
+    n_removed = 0
+    for ln in lines:
+        t = (ln.get("text") or "").strip()
+        h = ln.get("h", 0)
+        is_word_wm = bool(_re.search(
+            r"(闲鱼|嘘嘘|敦敦|嘘嚓|嘘飯|嘘敦|鱼嘘|响彭敦|CamScanner|扫描全能王|仅供内部|禁止外传)", t))
+        # 罕见水印字片段（斜排水印被 OCR 拆散, 正文几乎不含这些字; 含字形变体
+        # 嘘0x5653/嘘0x5618/魚0x9b5a/鱼0x9c7c/響/响/敦0x6566/尋0x5c0b 等）
+        # → 行内含任一 + 超高 + 极短(≤4) 即滤, 不会误删含正常词汇的行。
+        rare_wm = (h >= med_h * h_ratio and 1 <= len(t) <= 4
+                   and bool(_re.search(r"[嘘嘘魚鱼响響彭敦敦尋寻咸咸]", t)))
+        # 弱水印形态：超大 bbox + 短文本 + 无句读 + 同页重复 ≥2
+        #（斜排整词水印如"闲鱼嘘嘘敦敦"会被 OCR 成同一文本多次识别）。
+        weak_wm = (h >= med_h * h_ratio and len(t) <= max_len
+                   and not _re.match(r"^[\d\s:：.．-]+$", t)
+                   and not t.endswith(("。", "！", "？", "："))
+                   and text_cnt.get(t, 0) >= 2)
+        if t and (is_word_wm or rare_wm or weak_wm):
+            n_removed += 1
+            log(f"    [wm] 滤除水印行: 「{t}」")
+            continue
+        kept.append(ln)
+    if n_removed:
+        data["lines"] = kept
+    return n_removed
+
+
 def _fix_lines_in_page(data, word_fixes, cross_line_fixes, page_label, log):
     """对一页 lines 应用纠错，返回修正数。修改直接写回 data["lines"]。"""
     lines = data.get("lines", [])
@@ -121,7 +174,22 @@ def run_global_fix(project, log=print) -> int:
     ocr_dir = str(project.get_ocr_pages_json_dir())
     if not os.path.isdir(ocr_dir):
         return 0
-    log("  (OCR 内置通用纠错: 形近字修正)")
+    log("  (OCR 内置通用纠错: 形近字修正 + 水印行滤除)")
     total = fix_pages(ocr_dir, GLOBAL_WORD_FIXES, GLOBAL_CROSS_LINE_FIXES, log=log)
+    # 斜排水印行滤除（通用：Vision 对斜排半透明水印给超大 bbox + 短文本特征）
+    wm = 0
+    for fname in sorted(os.listdir(ocr_dir)):
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(ocr_dir, fname)
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        n = _filter_watermark_lines(data, log)
+        if n:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            wm += n
+    if wm:
+        log(f"    滤除水印行 {wm} 处")
     log(f"    共修正 {total} 处")
-    return total
+    return total + wm

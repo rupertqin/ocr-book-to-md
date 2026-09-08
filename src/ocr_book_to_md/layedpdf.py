@@ -303,8 +303,9 @@ def find_cover(project):
     cfg = Config(str(project.path))
     img_dir = cfg.get_images_dir()
     candidates = [img_dir] if img_dir else []
-    if project.images_dir.is_dir():
-        candidates.append(str(project.images_dir))
+    inp = project.get_input_dir()
+    if inp.is_dir():
+        candidates.append(str(inp))
     for d in candidates:
         if not d or not os.path.isdir(d):
             continue

@@ -147,8 +147,12 @@ def scan_pages(images_dir):
     pages = {}
     if not os.path.isdir(images_dir):
         return pages
+    # 仅图片为"页源"；PDF 由 prepare_pdf_sources 单独展开（assets 里可混放）
+    _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
     items = []
     for f in os.listdir(images_dir):
+        if not f.lower().endswith(_IMG_EXT):
+            continue
         m = PAGE_RE.search(f)
         if m:
             items.append((int(m.group(1)), f))
@@ -481,7 +485,17 @@ def prepare_images(images_dir, pages, out, force=False,
     long_image_pages = {}
     new_pages = dict(pages)
     for n, fname in sorted(pages.items()):
-        src = os.path.join(images_dir, fname)
+        # PDF 渲染页（prepare_pdf_sources 已写入 <out>/_ocr_tmp/p{n}.jpg）源不在
+        # images_dir，指向 tmp 下已渲染文件；普通图源在 images_dir。
+        is_pdf_page = isinstance(fname, str) and fname.startswith("[pdf]")
+        if is_pdf_page:
+            # long_image_pages/组名统一用**真实文件名**(去 [pdf] 前缀)——否则与
+            # prepare_pdf_sources 用纯文件名登记的组不一致, 会把同一 PDF 拆成两章。
+            fname_key = fname[len("[pdf]"):]
+            src = os.path.join(tmp, f"p{n}.jpg")
+        else:
+            fname_key = fname
+            src = os.path.join(images_dir, fname)
         dst = os.path.join(tmp, f"p{n}.jpg")
         if not os.path.isfile(src):
             continue
@@ -497,8 +511,9 @@ def prepare_images(images_dir, pages, out, force=False,
             continue
 
         W, H = im.size
-        # 超长图 → 内容感知切分
-        if H > min_h and H / W >= max_ratio:
+        # 超长图 → 内容感知切分。PDF 渲染页已在 render_pdf_pages 阶段按同样规则
+        # 切好（每片 ratio<3），此处若再切会与后续切片页号冲突、误删相邻片 → 跳过。
+        if not is_pdf_page and H > min_h and H / W >= max_ratio:
             rgb = _to_rgb(im)
             gray = np.asarray(rgb.convert("L"))
             # 切片高度上限按图片宽度 × slice_ratio（≈内容区高/宽），保证 layed 里各片
@@ -535,8 +550,8 @@ def prepare_images(images_dir, pages, out, force=False,
                         continue
                     crop = rgb.crop((0, y0, W, y1))
                     crop.save(os.path.join(tmp, f"p{_pn}.jpg"), "JPEG", quality=95)
-                    new_pages[_pn] = fname
-                    long_image_pages.setdefault(fname, []).append(_pn)
+                    new_pages[_pn] = fname_key
+                    long_image_pages.setdefault(fname_key, []).append(_pn)
                     _pn += 1
                     _kept += 1
                 if _kept > 0:
@@ -559,7 +574,10 @@ def prepare_images(images_dir, pages, out, force=False,
         print(f"  已切分 {sliced} 张超长图（空白处切分，避免切到图表），"
               f"页数 {len(pages)} → {len(new_pages)}")
     write_blank_pages(out, blank_pages)
-    write_long_image_pages(out, long_image_pages)
+    # 合并已有的 long_image_pages（PDF 源分组可能已由 prepare_pdf_sources 写入）
+    _lip = read_long_image_pages(out)
+    _lip.update(long_image_pages)
+    write_long_image_pages(out, _lip)
     print(f"图片预处理完成：{copied} 张 JPEG 直接复制 + {converted} 张转 JPEG"
           f" + {blank} 张空白过滤 + {sliced} 张长图切分（临时目录 {tmp}）")
     return tmp, new_pages
@@ -587,20 +605,29 @@ def run(project, images_dir, start=None, end=None, force_ocr=False):
         subprocess.run(["swiftc", "-o", bin_path, str(SWIFT_SRC)], check=True)
 
     pages = scan_pages(images_dir)
-    if not pages:
-        raise SystemExit(f"错误：截图目录 {images_dir} 里找不到含数字页号的文件")
-    rng = auto_page_range(pages)
-    start = start if start is not None else rng[0]
-    end = end if end is not None else rng[1]
-    print(f"检测到 {len(pages)} 页，OCR 范围 p{start}..p{end}")
+    print(f"图片页: {len(pages)}")
 
-    # 超长图切分参数（可配置）
+    # 超长图/超长 PDF 页切分参数（可配置）
     from .config import Config
     _cfg = Config(str(project.path))
     _max_ratio = float(_cfg.get('book.split_long_image_max_ratio', 3.0))
     _max_h = int(_cfg.get('book.split_slice_max_h', 2600))
     _min_h = int(_cfg.get('book.split_slice_min_h', 1400))
     _slice_ratio = float(_cfg.get('book.split_slice_ratio', 3.0))
+
+    # PDF 源：assets 里的 .pdf 渲染成页图（_ocr_tmp/p{n}.jpg），登记 long_image_pages
+    # 渲染时对"单页即超长滚动截图"的 PDF 页也做切分（页号连续顺延）。
+    from .pdfsource import prepare_pdf_sources
+    pages, _pdf_pages = prepare_pdf_sources(
+        images_dir, out, pages, force=force_ocr,
+        max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
+        slice_ratio=_slice_ratio)
+    if not pages:
+        raise SystemExit(f"错误：目录 {images_dir} 里没有图片或 .pdf 输入")
+    rng = auto_page_range(pages)
+    start = start if start is not None else rng[0]
+    end = end if end is not None else rng[1]
+    print(f"共 {len(pages)} 页，OCR 范围 p{start}..p{end}")
 
     img_for_ocr, pages = prepare_images(
         images_dir, pages, out, force=force_ocr,

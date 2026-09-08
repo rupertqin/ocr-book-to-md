@@ -213,7 +213,8 @@ class Config:
 # 书籍信息
 book:
   name: ""            # 书名（默认取项目目录名）
-  images_dir: ""      # 截图目录（默认 data/images）
+  images_dir: assets  # 输入素材目录（截图 .png/.jpg 或 .pdf；相对项目目录）。
+                      # 默认 assets；历史项目曾用 data/images，可在此改回或写具体路径。
   start_page: null    # 起始页（默认自动探测）
   end_page: null      # 结束页（默认自动探测）
   force_ocr: false    # 忽略 OCR 缓存，强制重跑（等价命令行 --force）
