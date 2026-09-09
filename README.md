@@ -110,7 +110,7 @@ python main.py pdf -p ./projects/进化心理学 --type img         # 原图片�
 
 | 长 | 适用命令 | 说明 |
 |----|---------|------|
-| `--images` | `ocr`, `detect`, `pdf`, `imgpdf`, `pipeline` | 截图目录 |
+| `--assets` | `ocr`, `detect`, `pdf`, `imgpdf`, `pipeline` | 输入素材目录（图片/PDF） |
 | `--start` / `--end` | `ocr` | 起始 / 结束页 |
 | `--chapters` | `build` | 人工章节结构 JSON |
 | `--output` | `pdf`, `layedpdf` | 输出 PDF 路径 |
@@ -276,7 +276,7 @@ pdf:
 ```yaml
 book:
   name: "进化心理学"       # 书名（默认取项目目录名）
-  images_dir: "assets"  # 截图目录（相对项目目录解析，默认 assets）
+  assets_dir: "assets"  # 输入素材目录（截图或 PDF；相对项目目录解析，默认 assets）
   start_page: null        # 起始页（默认自动探测）
   end_page: null          # 结束页（默认自动探测）
   force_ocr: false        # 忽略 OCR 缓存，强制重跑
@@ -304,7 +304,7 @@ pdf:                      # document-factory PDF 流程（以库方式调用，�
 命令行参数 > .env > config.yaml > 默认值
 ```
 
-`.env` 变量命名规则：config.yaml 点号路径转大写下划线，例如 `pdf.title` → `PDF_TITLE`、`book.images_dir` → `BOOK_IMAGES_DIR`。敏感信息（如 document-factory 的 COOKIE）放 `.env`。
+`.env` 变量命名规则：config.yaml 点号路径转大写下划线，例如 `pdf.title` → `PDF_TITLE`、`book.assets_dir` → `BOOK_ASSETS_DIR`。敏感信息（如 document-factory 的 COOKIE）放 `.env`。
 
 ---
 
@@ -346,17 +346,17 @@ from document_factory.pdf_generator import create_pdf
 ```
 
 ```bash
-# 一键：图片 → PDF（默认用项目的 assets；也可在 config 配 book.images_dir）
+# 一键：图片 → PDF（默认用项目的 assets；也可在 config 配 book.assets_dir）
 python main.py pdf -p ./projects/影印本 --type img
 
-# 从别的目录生成（-i 可覆盖默认图片目录）
-python main.py pdf -p ./projects/影印本 --type img -i ./页面图目录
+# 从别的目录生成（--assets 可覆盖默认素材目录）
+python main.py pdf -p ./projects/影印本 --type img --assets ./页面图目录
 
 # 只准备结构不生成 PDF（调试）
 python main.py pdf -p ./projects/影印本 --type img --no-pdf
 ```
 
-> `-i/--images` 参数可选：图片目录优先级为 `-i 命令行 > config.book.images_dir > 项目 assets`。图片放在项目 `assets/` 下（或配置好 `book.images_dir`）时，可完全省略 `-i`。
+> `--assets` 参数可选：素材目录优先级为 `--assets 命令行 > config.book.assets_dir > 项目 assets`。图片/PDF 放在项目 `assets/` 下（或配置好 `book.assets_dir`）时，可完全省略 `--assets`。
 
 实现原理：
 1. 扫描图片目录，`cover.jpg`（或 `cover.png`）作为封面，其余图片按页号排序；

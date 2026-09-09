@@ -136,7 +136,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
 PAGE_RE = re.compile(r"(\d+)")
 
 
-def scan_pages(images_dir):
+def scan_pages(assets_dir):
     """扫描截图目录，从文件名提取页号，返回 {页号: 文件名} 映射。
 
     按 (页号, 文件名) 排序，保证处理顺序稳定；同页号（文件名里数字相同，如
@@ -145,12 +145,12 @@ def scan_pages(images_dir):
     页号不变，排序不受影响。
     """
     pages = {}
-    if not os.path.isdir(images_dir):
+    if not os.path.isdir(assets_dir):
         return pages
     # 仅图片为"页源"；PDF 由 prepare_pdf_sources 单独展开（assets 里可混放）
     _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
     items = []
-    for f in os.listdir(images_dir):
+    for f in os.listdir(assets_dir):
         if not f.lower().endswith(_IMG_EXT):
             continue
         m = PAGE_RE.search(f)
@@ -453,7 +453,7 @@ def write_blank_pages(out, page_nums):
         f.write(" ".join(str(x) for x in sorted(set(page_nums))))
 
 
-def prepare_images(images_dir, pages, out, force=False,
+def prepare_images(assets_dir, pages, out, force=False,
                    max_ratio=3.0, max_h=2600, min_h=1400, slice_ratio=3.0):
     """把输入图片统一归一化为 JPEG，输出到 <out>/_ocr_tmp/。
     返回 (临时图片目录, 展开后的 pages 字典)。完全沿用 run.py 的 prepare_images。
@@ -486,7 +486,7 @@ def prepare_images(images_dir, pages, out, force=False,
     new_pages = dict(pages)
     for n, fname in sorted(pages.items()):
         # PDF 渲染页（prepare_pdf_sources 已写入 <out>/_ocr_tmp/p{n}.jpg）源不在
-        # images_dir，指向 tmp 下已渲染文件；普通图源在 images_dir。
+        # assets_dir，指向 tmp 下已渲染文件；普通图源在 assets_dir。
         is_pdf_page = isinstance(fname, str) and fname.startswith("[pdf]")
         if is_pdf_page:
             # long_image_pages/组名统一用**真实文件名**(去 [pdf] 前缀)——否则与
@@ -495,7 +495,7 @@ def prepare_images(images_dir, pages, out, force=False,
             src = os.path.join(tmp, f"p{n}.jpg")
         else:
             fname_key = fname
-            src = os.path.join(images_dir, fname)
+            src = os.path.join(assets_dir, fname)
         dst = os.path.join(tmp, f"p{n}.jpg")
         if not os.path.isfile(src):
             continue
@@ -583,12 +583,12 @@ def prepare_images(images_dir, pages, out, force=False,
     return tmp, new_pages
 
 
-def run(project, images_dir, start=None, end=None, force_ocr=False):
+def run(project, assets_dir, start=None, end=None, force_ocr=False):
     """对项目执行 OCR 步骤。
 
     Args:
         project: Project 实例
-        images_dir: 源图目录（已解析）
+        assets_dir: 源图目录（已解析）
         start/end: 页码范围（None=自动探测）
         force_ocr: 是否忽略 OCR 缓存
     Returns:
@@ -604,7 +604,7 @@ def run(project, images_dir, start=None, end=None, force_ocr=False):
             raise SystemExit(f"错误：找不到 ocr_batch.swift（{SWIFT_SRC}）")
         subprocess.run(["swiftc", "-o", bin_path, str(SWIFT_SRC)], check=True)
 
-    pages = scan_pages(images_dir)
+    pages = scan_pages(assets_dir)
     print(f"图片页: {len(pages)}")
 
     # 超长图/超长 PDF 页切分参数（可配置）
@@ -619,18 +619,18 @@ def run(project, images_dir, start=None, end=None, force_ocr=False):
     # 渲染时对"单页即超长滚动截图"的 PDF 页也做切分（页号连续顺延）。
     from .pdfsource import prepare_pdf_sources
     pages, _pdf_pages = prepare_pdf_sources(
-        images_dir, out, pages, force=force_ocr,
+        assets_dir, out, pages, force=force_ocr,
         max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
         slice_ratio=_slice_ratio)
     if not pages:
-        raise SystemExit(f"错误：目录 {images_dir} 里没有图片或 .pdf 输入")
+        raise SystemExit(f"错误：目录 {assets_dir} 里没有图片或 .pdf 输入")
     rng = auto_page_range(pages)
     start = start if start is not None else rng[0]
     end = end if end is not None else rng[1]
     print(f"共 {len(pages)} 页，OCR 范围 p{start}..p{end}")
 
     img_for_ocr, pages = prepare_images(
-        images_dir, pages, out, force=force_ocr,
+        assets_dir, pages, out, force=force_ocr,
         max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
         slice_ratio=_slice_ratio)
 

@@ -74,7 +74,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     # ocr
     ocr_p = subparsers.add_parser('ocr', help='OCR 步骤')
     ocr_p.add_argument('-p', '--project', default='.', help='项目目录')
-    ocr_p.add_argument('--images', default=None, help='输入素材目录（默认 config.yaml 的 book.images_dir 或 assets/）')
+    ocr_p.add_argument('--assets', default=None, help='输入素材目录（图片或 PDF；默认 config.yaml 的 book.assets_dir 或 assets/）')
     ocr_p.add_argument('--start', type=int, default=None, help='起始页')
     ocr_p.add_argument('--end', type=int, default=None, help='结束页')
     ocr_p.add_argument('-f', '--force', action='store_true', default=None, help='忽略缓存（OCR 缓存，重跑全部页）')
@@ -82,7 +82,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     # detect
     det_p = subparsers.add_parser('detect', help='布局分析步骤')
     det_p.add_argument('-p', '--project', default='.', help='项目目录')
-    det_p.add_argument('--images', default=None, help='截图目录（默认自动：预处理 JPEG 或原图）')
+    det_p.add_argument('--assets', default=None, help='输入素材目录（默认自动：预处理 JPEG 或原图）')
     det_p.add_argument('pages', nargs='*', type=int, help='仅处理指定页（调试用）')
 
     # build
@@ -105,7 +105,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     pdf_p.add_argument('--letter-spacing', default=None, help='CSS letter-spacing（layed 用）')
     pdf_p.add_argument('--punct-compress', default=None, help='标点压缩 CSS 值（layed 用）')
     # img 专用
-    pdf_p.add_argument('--images', default=None, help='图片目录（img 用，默认 assets/，封面 cover.jpg）')
+    pdf_p.add_argument('--assets', default=None, help='输入素材目录（img 用，默认 assets/，封面 cover.jpg）')
     pdf_p.add_argument('--title', default=None, help='PDF 标题（img 用，默认书名）')
     pdf_p.add_argument('--no-pdf', action='store_true', help='只准备结构不生成（img 用）')
     pdf_p.add_argument('pages', nargs='*', type=int, help='仅渲染指定页（layed 调试用）')
@@ -113,7 +113,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     # imgpdf / layedpdf（兼容别名，等价于 pdf --type img / layed）
     img_p = subparsers.add_parser('imgpdf', help='（兼容别名）= pdf --type img')
     img_p.add_argument('-p', '--project', default='.', help='项目目录')
-    img_p.add_argument('--images', default=None, help='图片目录')
+    img_p.add_argument('--assets', default=None, help='输入素材目录')
     img_p.add_argument('--title', default=None, help='PDF 标题')
     img_p.add_argument('--no-pdf', action='store_true', help='只准备结构，不生成 PDF')
 
@@ -134,7 +134,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     pipe_p.add_argument('--pdf', dest='pdf_mode', default=None,
                         choices=['text', 'img', 'layed'],
                         help='最终 PDF 方式：text(文字流)/img(原图片)/layed(文字置于图)（默认读 config.pipeline.pdf 或 text）')
-    pipe_p.add_argument('--images', default=None, help='截图目录')
+    pipe_p.add_argument('--assets', default=None, help='输入素材目录（图片或 PDF）')
     pipe_p.add_argument('-f', '--force', action='store_true', default=None,
                         help='全部步骤不使用缓存（当前指 OCR 缓存，重跑全部页）')
     pipe_p.add_argument('--no-pdf', action='store_true', help='不生成 PDF，只到流程中间产物为止')
@@ -166,7 +166,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     if args.command == 'pdftotext':
         from . import pdfsource
         from pathlib import Path as _P
-        inp = config.get_images_dir() or str(project.get_input_dir())
+        inp = config.get_assets_dir() or str(project.get_input_dir())
         pdfs = pdfsource.find_pdfs(inp)
         if not pdfs:
             print(f"目录 {inp} 里没有 .pdf")
@@ -196,11 +196,11 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
 
     if args.command == 'ocr':
         from . import ocr as ocr_mod
-        images = args.images or config.get_images_dir() or str(project.get_input_dir())
+        assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
         force = args.force
         if force is None:
             force = config.get_force_ocr()
-        img_for_ocr, start, end = ocr_mod.run(project, images,
+        img_for_ocr, start, end = ocr_mod.run(project, assets,
                                               start=args.start or config.get_start_page(),
                                               end=args.end or config.get_end_page(),
                                               force_ocr=force)
@@ -213,9 +213,9 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     if args.command == 'detect':
         from . import detect as detect_mod
         # detect 默认用预处理 JPEG 目录；若原图就是 pN.png 命名且非真 PNG，可用原图
-        images = args.images
-        if not images:
-            images = config.get_images_dir() or str(project.get_input_dir())
+        assets = args.assets
+        if not assets:
+            assets = config.get_assets_dir() or str(project.get_input_dir())
         # 优先用 OCR 预处理后的 JPEG 目录（统一 pN.jpg，规避 PNG SIGBUS）
         # OCR 中间件 + 纠错钩子（per-project）：先清理 pages_json，再修正 OCR 错字，
         # 之后 detect 才产干净 blocks
@@ -223,8 +223,8 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         run_ocr_hooks(project)
         pre_tmp = project.output_dir / "_ocr_tmp"
         if pre_tmp.is_dir():
-            images = str(pre_tmp)
-        detect_mod.detect(project, images, pages=args.pages or None)
+            assets = str(pre_tmp)
+        detect_mod.detect(project, assets, pages=args.pages or None)
         _print_summary(project)
         return
 
@@ -246,8 +246,8 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
 
     if _pdf_type == 'img':
         from . import imgpdf as imgpdf_mod
-        images = args.images or config.get_images_dir() or str(project.get_input_dir())
-        imgpdf_mod.make_imgpdf(project, images, book_name=args.title,
+        assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
+        imgpdf_mod.make_imgpdf(project, assets, book_name=args.title,
                                no_pdf=args.no_pdf)
         return
 
@@ -276,7 +276,7 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
         from . import layedpdf as layed_mod
         from . import imgpdf as imgpdf_mod
 
-        images = args.images or config.get_images_dir() or str(project.get_input_dir())
+        assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
         force = args.force
         if force is None:
             force = config.get_force_ocr()
@@ -296,14 +296,14 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
             print("=" * 40)
             print("图片直转 PDF（imgpdf）")
             print("=" * 40)
-            imgpdf_mod.make_imgpdf(project, images, no_pdf=args.no_pdf)
+            imgpdf_mod.make_imgpdf(project, assets, no_pdf=args.no_pdf)
             return
 
         # text 和 layed 都需要 ocr + detect
         print("=" * 40)
         print("① OCR")
         print("=" * 40)
-        img_for_ocr, start, end = ocr_mod.run(project, images, force_ocr=force)
+        img_for_ocr, start, end = ocr_mod.run(project, assets, force_ocr=force)
 
         print("=" * 40)
         print("② 布局分析")

@@ -47,7 +47,7 @@ def _page_img_size(project, n):
 
     优先用 OCR 预处理目录 _ocr_tmp/ 里的 p{n}.jpg——超长图被切分后，某页对应的是
     切片（如 1403×1822）而非原长图（1403×12060），用错尺寸会让 scale 严重偏差，
-    导致文字/图位置挤成一小块。找不到再回退 data/images/ 与默认值。
+    导致文字/图位置挤成一小块。找不到再回退项目 assets/ 与默认值。
     """
     tmp = project.output_dir / "_ocr_tmp"
     cand = tmp / f"p{n}.jpg"
@@ -56,7 +56,7 @@ def _page_img_size(project, n):
             return Image.open(cand).size
         except Exception:
             pass
-    img_dir = project.data_dir / "images"
+    img_dir = project.get_input_dir()
     if img_dir.is_dir():
         for f in sorted(img_dir.iterdir()):
             m = re.search(r"(\d+)", f.name)
@@ -295,14 +295,14 @@ def _collect_pages(project, pages=None):
 
 
 def find_cover(project):
-    """在项目图片目录找封面 cover.jpg / cover.png。找不到返回 None。
+    """在输入素材目录找封面 cover.jpg / cover.png。找不到返回 None。
 
-    图片目录优先级：config.book.images_dir > 项目 data/images。
+    目录优先级：config.book.assets_dir > 项目 assets/（get_input_dir）。
     """
     from .config import Config
     cfg = Config(str(project.path))
-    img_dir = cfg.get_images_dir()
-    candidates = [img_dir] if img_dir else []
+    assets = cfg.get_assets_dir()
+    candidates = [assets] if assets else []
     inp = project.get_input_dir()
     if inp.is_dir():
         candidates.append(str(inp))

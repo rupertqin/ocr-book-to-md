@@ -7,8 +7,8 @@
 .env 变量命名规则:
     config.yaml 中的点号路径转大写下划线，例如:
         book.name       ->  BOOK_NAME
+        book.assets_dir ->  BOOK_ASSETS_DIR
         pdf.title       ->  PDF_TITLE
-        images.dir      ->  IMAGES_DIR
 """
 
 import os
@@ -158,9 +158,11 @@ class Config:
     def get_book_name(self) -> str:
         return self.get('book.name') or self.path.name
 
-    def get_images_dir(self) -> Optional[str]:
-        """获取截图目录；config 中的相对路径以项目目录为基准解析。"""
-        raw = self.get('book.images_dir')
+    def get_assets_dir(self) -> Optional[str]:
+        """获取输入素材目录（截图 .png/.jpg 或 .pdf 都可，统一 assets 语义）；
+        config 中的相对路径以项目目录为基准解析。未配置返回 None（由 CLI 兜底
+        用 project.get_input_dir() = assets/）。"""
+        raw = self.get('book.assets_dir')
         if not raw:
             return None
         p = Path(raw).expanduser()
@@ -213,8 +215,8 @@ class Config:
 # 书籍信息
 book:
   name: ""            # 书名（默认取项目目录名）
-  images_dir: assets  # 输入素材目录（截图 .png/.jpg 或 .pdf；相对项目目录）。
-                      # 默认 assets；历史项目曾用 data/images，可在此改回或写具体路径。
+  assets_dir: assets  # 输入素材目录（截图 .png/.jpg 或 .pdf 都放这里；相对项目目录）。
+                      # 默认 assets/（Project.assets_dir）；覆盖后 CLI 走此目录。
   start_page: null    # 起始页（默认自动探测）
   end_page: null      # 结束页（默认自动探测）
   force_ocr: false    # 忽略 OCR 缓存，强制重跑（等价命令行 --force）

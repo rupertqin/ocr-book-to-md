@@ -1492,7 +1492,7 @@ def detect(project, img_dir, pages=None):
                          f"  请先运行 OCR：python main.py ocr -p <project>")
     if not os.path.isdir(img_dir):
         raise SystemExit(f"错误：未找到截图目录 {img_dir}\n"
-                         f"  请用 --images 指定正确的截图目录")
+                         f"  请用 --assets 指定正确的素材目录（或先跑 OCR）")
 
     # 计算全书统一正文基准行高（跨页面有效）：所有页 OCR 行高的中位数。
     # 标题字号与正文字号的比较用全局基准，避免单页 body_h 估算波动。
