@@ -59,11 +59,89 @@ def slugify(t):
     return t
 
 
-def _long_image_title(blocks_dir, first_page):
-    """取长图文章标题：对第一片顶部的文本块做**综合判断**识别标题区。
+# 长图文章标题定位：首片顶部区域内的中日韩文本行；不含中文的行（时间/电量等
+# 状态栏、纯数字符号）与以冒号结尾的节标签（"上证指数："）均排除，再取行高最大者。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_TITLE_TOP_ZONE = 0.35   # 标题候选只在首片顶部 35% 页高内寻找
 
-    不依赖 detect 的 heading 判定（heading 对长图常因行高/加粗边界漏判），而直接
-    分析第一片最顶部的文本块，用**多个信号综合**（单一信号都不是必须的）：
+
+def _find_long_image_title_line(blocks_dir, first_page):
+    """通用：在长图首片顶部定位"标题行"，返回 (text, y_top, h)（归一化）或 None。
+
+    判据（纯排版形态，与平台/项目文案无关）：
+      1) 位于首片顶部区域（y_top ≤ 35% 页高）；
+      2) 含中日韩文字 —— 天然排除状态栏/时间/电量等行（"11:22"、"×11 85"、"•"）；
+      3) 不以 "：" / ":" 结尾 —— 排除"上证指数："这类节标签；
+      4) 候选中取**行高最大**者（标题字号显著大于正文与头部元信息），并列取更长者。
+    """
+    pages_json = os.path.join(os.path.dirname(os.path.abspath(blocks_dir)),
+                              "ocr", "pages_json", f"{first_page}.json")
+    if not os.path.isfile(pages_json):
+        return None
+    try:
+        with open(pages_json, encoding="utf-8") as f:
+            lines = json.load(f).get("lines", [])
+    except Exception:
+        return None
+    cands = []
+    for ln in lines:
+        t = (ln.get("text") or "").strip()
+        if not t or not _CJK_RE.search(t) or t[-1] in "：:":
+            continue
+        try:
+            y_top = 1.0 - float(ln["y"]) - float(ln["h"])
+            h = float(ln["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 < y_top <= _TITLE_TOP_ZONE and h > 0:
+            cands.append((t, y_top, h))
+    if not cands:
+        return None
+    return max(cands, key=lambda c: (c[2], len(c[0])))
+
+
+def _long_image_title_from_ocr(blocks_dir, first_page):
+    """通用：从首片**原始 OCR lines** 定位长图文章标题（不依赖平台/项目文案）。
+
+    为什么需要它：detect 的 heading 判定会漏判（长图标题常只比正文大一点），且标题
+    若落在图片检测区域内会被当"图内文字"剔除，blocks 里就没有这一行了——而长图首片
+    顶部的原始 OCR 里标题始终存在。判据见 `_find_long_image_title_line`。
+
+    Returns:
+        标题字符串；未找到返回 ""（由调用方回退 blocks 综合判断）。
+    """
+    hit = _find_long_image_title_line(blocks_dir, first_page)
+    return hit[0] if hit else ""
+
+
+def _long_image_title_span_px(blocks_dir, first_page):
+    """标题行在首片的**像素** y 范围 (y0, y1, title_h)；取不到返回 None。
+
+    用途：丢弃与标题重复的"标题条截图"——长截图顶部那条"标题 + 作者"的横条常被
+    detect 判成 image block（裁成 p{n}_f1.png），若标题文字已提取为 `# 标题`，再
+    渲染这张图就是图文重复（应留字去图）。页高取自 OCR 预处理切片图
+    `output/_ocr_tmp/p{n}.jpg`（与 detect 同源），保证像素坐标与 blocks 对齐。
+    """
+    hit = _find_long_image_title_line(blocks_dir, first_page)
+    if not hit:
+        return None
+    _, y_top, h = hit
+    jpg = os.path.join(os.path.dirname(os.path.abspath(blocks_dir)),
+                       "_ocr_tmp", f"p{first_page}.jpg")
+    try:
+        from PIL import Image as _Image
+        with _Image.open(jpg) as im:
+            H = float(im.size[1])
+    except Exception:
+        return None
+    return (y_top * H, (y_top + h) * H, h * H)
+
+
+def _long_image_title(blocks_dir, first_page):
+    """取长图文章标题。
+
+    先走 `_long_image_title_from_ocr`（读首片原始 OCR，通用排版判据，最稳）；取不到
+    时回退到对第一片 blocks 顶部的**综合判断**：
 
       - 位置：标题在第一片最顶部（正文/小节标签之前，或紧随顶部元信息之后）；
       - 字号：标题字号**不小于**页内正文行高中位（节标签/图表注字号明显更小）；
@@ -72,6 +150,9 @@ def _long_image_title(blocks_dir, first_page):
 
     图片上标题顺序固定，结果只依赖图片排版，与 OCR 拆行无关。
     """
+    t = _long_image_title_from_ocr(blocks_dir, first_page)
+    if t:
+        return t
     data = _load_blocks(blocks_dir, first_page)
     if not data:
         return ""
@@ -413,13 +494,38 @@ def render_page(blocks_dir, n, skip_title=None, no_headings=False):
     return "".join(out)
 
 
+def _is_title_bar_block(page, block, drop_img_span):
+    """image block 是否是"标题条截图"（应留字去图的那张）。
+
+    drop_img_span = (page, y0, y1, title_h)：标题行的页号与像素 y 范围/行高。
+    判据以"与标题行重叠"为主（长截图顶部的"标题+作者"横条必然压着标题行），
+    以"图片高度 ≤ 3×标题行高（同量级）"为辅——避免把恰好与标题行有交叠的
+    正文大图误删。
+    """
+    if not drop_img_span:
+        return False
+    p, y0, y1, title_h = drop_img_span
+    if page != p:
+        return False
+    b_top = block.get("y_top")
+    b_bot = block.get("y_bottom")
+    if b_top is None or b_bot is None:
+        return False
+    if not (b_top < y1 and b_bot > y0):
+        return False          # 与标题行无重叠 → 正常内容图
+    img_h = b_bot - b_top
+    return title_h <= 0 or img_h <= 3 * title_h
+
+
 def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=False,
-                                skip_pages=()):
+                                skip_pages=(), drop_img_span=None):
     """跨页渲染：把 pages 列表里所有页的 blocks 合在一起按 y 排序，
     段落状态 cur_para 跨页延续——detect 标 para_start=False 的首行（切片边界
     续行）自动并入上一段，消除长图切片造成的"段中换页=两段"伪断裂。
 
     skip_pages: 这些页整页不参与渲染（沿用旧的 front 跳过第10/11/12页逻辑）。
+    drop_img_span: (page, y0, y1, title_h)，把该页与标题行重叠的"标题条截图"丢弃
+        ——标题文字已写在文件头 `# 标题`，同一张图再插一次即图文重复（留字去图）。
     """
     out = []
     all_blocks = []
@@ -670,6 +776,8 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
 
     for n, b in merged:
         if b["type"] == "image":
+            if _is_title_bar_block(n, b, drop_img_span):
+                continue      # 标题条截图：标题文字已在文件头，留字去图
             _flush_para()
             _flush_pending_list()
             cap = b.get("caption", "").strip()
@@ -800,9 +908,17 @@ def _write_chapter(blocks_dir, md_tmp, spec):
         # heading（图表标题等）仍当普通文本，只在文件头写 # 标题、并跳过正文
         # 里与标题相同的首个 heading 避免重复。普通书则按 heading 正常渲染。
         is_long_image = (slug == "")
+        drop_img_span = None
+        if is_long_image:
+            # 长截图顶部"标题+作者"横条常被 detect 裁成一张图；标题文字既已提取为
+            # 文件头 `# 标题`，就丢弃这张"标题条截图"，做到留字去图。
+            span = _long_image_title_span_px(blocks_dir, start)
+            if span:
+                drop_img_span = (start,) + tuple(span)
         body = _render_pages_cross_page(
             blocks_dir, list(range(start, end + 1)),
-            skip_title=title, no_headings=is_long_image or not bool(title))
+            skip_title=title, no_headings=is_long_image or not bool(title),
+            drop_img_span=drop_img_span)
     with open(p, "w", encoding="utf-8") as f:
         f.write("".join(head) + body)
     return p

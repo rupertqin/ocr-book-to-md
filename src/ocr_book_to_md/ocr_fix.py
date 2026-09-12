@@ -53,15 +53,24 @@ def _apply_word_fixes(t, word_fixes):
     return new
 
 
-def _filter_watermark_lines(data, log, h_ratio=4.0, max_len=12):
-    """按行高特征滤除"斜排水印"误识行（Vision 对斜排半透明水印会给异常大的
-    bbox：行高是正文行高的数倍甚至 10+ 倍，且文本短、无句读）。返回滤除行数。
+def _filter_watermark_lines(data, log, h_ratio=4.0, max_len=12,
+                            header_pages=None):
+    """滤除"异常/噪音行"：斜排水印误识行 + （长图首片的）状态栏残渣。返回滤除行数。
 
-    判定（全部满足才滤）：
+    一、斜排水印（Vision 对斜排半透明水印会给异常大的 bbox：行高是正文行高的数倍
+    甚至 10+ 倍，且文本短、无句读）：
       - 该行 h ≥ h_ratio × 页正文行高(h 中位)——正文行高差异小，中位稳；
       - 文本短（≤max_len）且不是数字/时间戳、不以句号/冒号结尾；
       - 同页中与它相似的水印文本反复出现（水印整页平铺）或文本是重复短词
         （斜排水印常被拆成"闲鱼嘘嘘敦敦"这类无意义短词）。
+
+    二、状态栏残渣（截长截图带进来的时间、电量、信号等），**仅对 header_pages 里
+    的页**（长图各组的首片）生效：位于页面最顶部（y_top ≤ 4% 页高）且**完全不含
+    中日韩文字**的极短行，如 "11:22"、"×11 85"、"09:49"、"•"、"<"。判据纯形态、
+    与平台无关；限定首片是为了不误伤普通页顶部可能出现的图表参数标注。
+
+    Args:
+        header_pages: 允许做状态栏滤除的页号集合（长图各组首片）；None = 不做该项。
     """
     lines = data.get("lines", [])
     if not lines:
@@ -96,9 +105,19 @@ def _filter_watermark_lines(data, log, h_ratio=4.0, max_len=12):
                    and not _re.match(r"^[\d\s:：.．-]+$", t)
                    and not t.endswith(("。", "！", "？", "："))
                    and text_cnt.get(t, 0) >= 2)
-        if t and (is_word_wm or rare_wm or weak_wm):
+        # 页面顶部状态栏残渣：仅长图首片 + 最顶部 + 完全不含中日韩文字 + 极短
+        try:
+            y_top = 1.0 - float(ln.get("y", 0.0)) - float(h)
+        except (TypeError, ValueError):
+            y_top = 1.0
+        top_status = (header_pages is not None
+                      and data.get("page") in header_pages
+                      and len(t) <= 10 and y_top <= 0.04
+                      and not _re.search(r"[\u4e00-\u9fff]", t))
+        if t and (is_word_wm or rare_wm or weak_wm or top_status):
             n_removed += 1
-            log(f"    [wm] 滤除水印行: 「{t}」")
+            tag = "hdr" if top_status and not (is_word_wm or rare_wm or weak_wm) else "wm"
+            log(f"    [{tag}] 滤除噪音行: 「{t}」")
             continue
         kept.append(ln)
     if n_removed:
@@ -174,8 +193,18 @@ def run_global_fix(project, log=print) -> int:
     ocr_dir = str(project.get_ocr_pages_json_dir())
     if not os.path.isdir(ocr_dir):
         return 0
-    log("  (OCR 内置通用纠错: 形近字修正 + 水印行滤除)")
+    log("  (OCR 内置通用纠错: 形近字修正 + 水印行滤除 + 长图首片状态栏滤除)")
     total = fix_pages(ocr_dir, GLOBAL_WORD_FIXES, GLOBAL_CROSS_LINE_FIXES, log=log)
+    # 长图各组首片页号：状态栏残渣（时间/电量/信号）只会在长截图首片出现，故限定
+    # 首片做该项滤除，避免误伤普通页顶部可能出现的图表参数标注。
+    header_pages = None
+    try:
+        from .ocr import read_long_image_pages
+        lip = read_long_image_pages(str(project.output_dir))
+        if lip:
+            header_pages = {min(ps) for ps in lip.values() if ps}
+    except Exception:
+        header_pages = None
     # 斜排水印行滤除（通用：Vision 对斜排半透明水印给超大 bbox + 短文本特征）
     wm = 0
     for fname in sorted(os.listdir(ocr_dir)):
@@ -184,12 +213,12 @@ def run_global_fix(project, log=print) -> int:
         path = os.path.join(ocr_dir, fname)
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        n = _filter_watermark_lines(data, log)
+        n = _filter_watermark_lines(data, log, header_pages=header_pages)
         if n:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             wm += n
     if wm:
-        log(f"    滤除水印行 {wm} 处")
+        log(f"    滤除噪音行 {wm} 处")
     log(f"    共修正 {total} 处")
     return total + wm

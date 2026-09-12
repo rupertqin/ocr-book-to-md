@@ -1,6 +1,5 @@
 book:
   name: 么瑞
-  assets_dir: assets
   start_page: null
   end_page: null
   force_ocr: false
@@ -20,6 +19,7 @@ pdf:
   engine: weasyprint
   chunk_articles: 1
   page_margin: 0.5cm 1cm
+  watermark: 婉若游龙
   mode: full
   font_family: Hiragino Sans GB
   toc_skip_articles: 2

@@ -22,6 +22,12 @@ GAP_TOL = 12
 PHOTO_MIN = 120
 PHOTO_MIN_W = 120
 RUN_GAP = 40
+# 扁条判据：高度 < PHOTO_FLAT_H 的照片候选需再看"着墨密度"——白底少量文字
+# （如长截图顶部"返回箭头+标题+已付费"横条，非白占比 ~0.15）应视为文字横条而非
+# 图片，否则会把标题当"图内文字"吞掉（正文标题丢失 + 图文重复）；真实图表/表格
+# 有底色或密集线条（非白占比 ≥0.3，如带粉色表头的表格 ~0.69）则保留。
+PHOTO_FLAT_H = 150
+PHOTO_FLAT_INK = 0.30
 
 
 def _norm_to_px(box, W, H):
@@ -1065,6 +1071,15 @@ def _pass_b_regions(px, W, H, img_gray, body_h, paras, passA, heading_rows,
                 break
         if y1 - y0 < PHOTO_MIN:
             continue
+        # 扁条判据：高度接近下限的候选，再用"非白像素占比"看它是不是真图。
+        # 白底少量文字（长截图顶部"‹ + 标题 + 已付费"横条，非白≈0.15、高度≈125px）
+        # 会被 RUN_GAP 粘连凑过 PHOTO_MIN 阈值 → 误判为图片，进而把标题当"图内文字"
+        # 剔除（标题从 blocks 消失 + 裁出一张与标题重复的图）。真实图表/表格有底色或
+        # 密集线条（非白 ≥0.3，如带表头底色的表格 ≈0.69），不受影响。
+        if (y1 - y0) < PHOTO_FLAT_H:
+            _band = img_gray[y0:y1, :]
+            if _band.size and (float((_band < 240).mean()) < PHOTO_FLAT_INK):
+                continue
         # 整段拒绝仅针对真正文段：统计 run 与正文段的**实际重叠**占比——run 起点
         # 紧贴正文段底边(±几 px 容差)不算"在段内"，否则分时图顶部若有一行图内字段
         # ("2026-06-08 均价…")被判 para, 其下紧贴的整张图 run 会被误拒(此前 bug)。
