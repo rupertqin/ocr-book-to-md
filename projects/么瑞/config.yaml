@@ -10,6 +10,7 @@ detect:
   middlewares:
   - hooks/clean_ocr.py
   - hooks/fix_ocr.py
+  - hooks/drop_reward_button.py
 pipeline:
   pdf: layed
 pdf:

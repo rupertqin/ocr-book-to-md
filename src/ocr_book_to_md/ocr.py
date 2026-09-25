@@ -134,15 +134,32 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
 
 
 PAGE_RE = re.compile(r"(\d+)")
+# _ocr_tmp 下的成品页图名：p{页号}.jpg（用于清理页号重排后不再使用的历史切片）
+TMP_PAGE_RE = re.compile(r"^p(\d+)\.jpg$")
+
+
+def _natural_name_key(name):
+    """文件名的"自然排序"键：其中的数字按**数值**比较。
+
+    纯字符串比较会把 '9-5.jpg' 排到 '9-25.jpg' 之后（'5' > '2'），日期命名的
+    长截图素材（9-5 / 9-12 / 9-19 / 9-25）顺序就乱了，成书章节顺序随之错乱。
+    数字补零成等宽字符串，既保证数值序，又避免 tuple 里 int/str 混比 TypeError。
+    """
+    return tuple(
+        f"{int(x):010d}" if x.isdigit() else x.lower()
+        for x in re.split(r"(\d+)", name) if x
+    )
 
 
 def scan_pages(assets_dir):
     """扫描截图目录，从文件名提取页号，返回 {页号: 文件名} 映射。
 
-    按 (页号, 文件名) 排序，保证处理顺序稳定；同页号（文件名里数字相同，如
-    "8-28.png"/"8-29.jpg" 都抽到 8）冲突时，按文件名顺序把后一个文件放到
-    下一个可用页号，避免 dict 覆盖丢失文件。无冲突项目（如 page_180/182/184）
-    页号不变，排序不受影响。
+    页号取文件名里**第一个数字**；同页号（如 "8-28.png"/"8-29.jpg" 都抽到 8，
+    或 "9-5.jpg"/"9-12.jpg" 都抽到 9）冲突时，按文件名**自然顺序**（数字按数值比）
+    把后一个文件顺延到下一个可用页号，避免 dict 覆盖丢失文件。
+    冲突时的排序必须用自然顺序而不是字符串顺序，否则 "9-5.jpg" 会排到
+    "9-12.jpg" 之后，章节顺序错乱。无冲突项目（如 page_180/182/184）页号与
+    处理顺序都不变。
     """
     pages = {}
     if not os.path.isdir(assets_dir):
@@ -156,7 +173,8 @@ def scan_pages(assets_dir):
         m = PAGE_RE.search(f)
         if m:
             items.append((int(m.group(1)), f))
-    items.sort(key=lambda t: (t[0], t[1]))
+    # 首数字为主序（无冲突项目顺序完全不变），同名首数字用自然序打平
+    items.sort(key=lambda t: (t[0], _natural_name_key(t[1])))
     used = set()
     for pn, f in items:
         while pn in used:  # 冲突：顺延到下一个未用页号
@@ -311,8 +329,11 @@ def _trim_image(im, pad_ratio=0.01):
       - 滚动条宽度区间 = W*[0.5%, 8%]
       - 滚动条到右边缘距离上限 = W*10%
       - 滚动条内部 = 深+浅两端像素都占该列高 >15%（bimodal 轨道+滑块），
-        且列均灰度偏离背景主色。
-    滚动条检测基于结构：它是与内容有白缝分隔、位于右侧的窄灰竖条。
+        且列均灰度偏离背景主色；或**浅灰指示条**（列均灰 ≥205、几乎无深色
+        像素段、整列偏离背景）。
+    滚动条检测基于结构：它是与内容有白缝分隔、位于右侧的窄灰竖条——因此除
+    宽度/位置外还必须满足"左侧有白缝"与"列内暗像素段数极少"，否则正文/图表
+    最右侧的列会被误判成滚动条而被裁掉（行末字被切半 → OCR 错字 + 假分段）。
     """
     W, H = im.size
     if W < 120 or H < 120:
@@ -335,6 +356,8 @@ def _trim_image(im, pad_ratio=0.01):
     # K 线图内容列=大量分散的蜡烛，暗像素段很多）。
     dr = (gray < 70).mean(axis=0); lr = (gray > 210).mean(axis=0)
     col_mean = gray.mean(axis=0)
+    col_ink = (gray < 200).mean(axis=0)      # 明显偏暗（墨迹）像素占比
+    col_off = (gray < bg - 6).mean(axis=0)   # 偏离背景的像素占比（白缝≈0）
     dark_mask = (gray < 70)
     # 每列暗像素的连续段数（行维）：统计"非暗→暗"的跳变次数
     col_dark_runs = np.zeros(W, dtype=int)
@@ -342,11 +365,28 @@ def _trim_image(im, pad_ratio=0.01):
         starts = dark_mask[1:] & ~dark_mask[:-1]
         col_dark_runs = starts.sum(axis=0)
         col_dark_runs += dark_mask[0]  # 首行是暗也算一段开始
-    sb_col = ((dr > 0.15) & (lr > 0.15) & (col_mean > 150) & (col_mean < 210)
-             & (col_dark_runs < 100))
-    # 滚动条段：连续的 sb_col，最右段且宽度 W*[0.5%, 8%]、距右边 ≤ W*10%
+    # 滚动条列候选（两类）：
+    #   ① 深/中灰滚动条：列均灰 150-210（灰带）+ bimodal（深+浅都>15%，轨道+滑块）
+    #      + 暗像素段数少（滑块是连续一两段；K 线图内容列是大量分散蜡烛）。
+    #   ② **浅灰滚动指示条**（iOS 式浅色条，浮在白底/浅底内容右侧）：列均灰 ≥205、
+    #      几乎没有深色像素段，且"有偏暗像素"或"整列明显偏离背景"。只认 ① 会把
+    #      这种浅条留在图里（成图右侧多出一条灰竖条）。
+    sb_col = (((dr > 0.15) & (lr > 0.15) & (col_mean > 150) & (col_mean < 210)
+               & (col_dark_runs < 100))
+              | ((col_mean >= 205) & (col_ink < 0.6) & (col_dark_runs < 15)
+                 & ((col_ink >= 0.03) | (col_off >= 0.5))))
+    # 滚动条段：连续的 sb_col，取最右段，且需同时满足：
+    #   ① 宽度 W*[0.5%, 8%]、距右边 ≤ W*10%；
+    #   ② **左侧有白缝**——滚动条是独立于内容的细条，与内容之间留白；
+    #   ③ 列内暗像素"段数"极少——轨道+滑块是一两段连续暗区。
+    # ②③ 是防误判的关键：正文/图表最右侧的几列同样"灰调、明暗混合、贴近右边缘"，
+    # 但它们是整列文字或蜡烛线（暗像素段数几十上百），且左邻就是内容（没有白缝）。
+    # 把这种列当滚动条裁掉会**切掉行末文字**——行末字被切掉右半边后 OCR 会把
+    # 「少」认成「！」、「概」认成「相」，正文出现错字，还会因伪句末标点把一句话
+    # 误切成两段（段首判定是"上一行以句末标点结尾"）。
     w_min = max(3, int(W * 0.005)); w_max = max(w_min + 1, int(W * 0.08))
     dist_max = int(W * 0.10)
+    gutter = max(3, int(W * 0.005))
     sb_mask = np.zeros(W, dtype=bool)
     _idx = np.where(sb_col)[0]
     if len(_idx) >= 3:
@@ -359,9 +399,16 @@ def _trim_image(im, pad_ratio=0.01):
         _runs.append((_start, _prev))
         for (rs, re) in reversed(_runs):
             w = re - rs + 1
-            if w_min <= w <= w_max and (W - 1 - re) <= dist_max:
-                sb_mask[rs:re+1] = True
-                break
+            if not (w_min <= w <= w_max and (W - 1 - re) <= dist_max):
+                continue
+            if int(col_dark_runs[rs:re+1].max()) >= 15:
+                continue        # ③ 暗像素段太多 → 文字/图表列，不是滚动条
+            if rs > 0:
+                _gut = col_off[max(0, rs - gutter):rs]
+                if _gut.size and float(_gut.max()) >= 0.03:
+                    continue    # ② 左侧紧邻内容（无白缝）→ 不是滚动条
+            sb_mask[rs:re+1] = True
+            break
     # 内容 = 边缘或与背景差异明显，但**排除滚动条列**（滚动条不是图内容）
     content = (edge | (np.abs(gray - bg) > 50))
     if sb_mask.any():
@@ -453,17 +500,40 @@ def write_blank_pages(out, page_nums):
         f.write(" ".join(str(x) for x in sorted(set(page_nums))))
 
 
+def _alloc_page_numbers(preferred, count, used):
+    """为一张长图的 count 个连续切片选起始页号。
+
+    优先从 preferred（该素材在 assets 里的原始页号）开始，让页号尽量贴近原始编号；
+    若区间 [preferred, preferred+count) 与**已分配页号** used（别的长图切片 / PDF
+    渲染页）相交，则把**整段**后移到 max(used)+1。
+
+    为什么要整段后移而不是逐个跳过占用号：逐个跳号会把一张长图的切片页号打散，
+    跨页渲染时切片顺序错乱。为什么绝不能与 used 重叠：同一批页被两个"长图组"
+    同时登记后，build_md.auto_chapters 会逐组各自成一篇文章，于是同一批页被切成
+    两篇（重复正文，且后一篇的标题会取到页中间的正文句）。
+    """
+    if count <= 0:
+        return preferred
+    if any((preferred + i) in used for i in range(count)):
+        return (max(used) + 1) if used else preferred
+    return preferred
+
+
 def prepare_images(assets_dir, pages, out, force=False,
                    max_ratio=3.0, max_h=2600, min_h=1400, slice_ratio=3.0):
     """把输入图片统一归一化为 JPEG，输出到 <out>/_ocr_tmp/。
     返回 (临时图片目录, 展开后的 pages 字典)。完全沿用 run.py 的 prepare_images。
 
-    处理两件事：
+    处理三件事：
     1. 自动过滤"完全空白"的图片（如透明白图）：不产出对应的 p{n}.jpg，
        并把空白页号写入 <out>/blank_pages.txt 持久化。
     2. 超长图（高宽比 >= max_ratio，如滚动长截图）内容感知切分为多片：
        在空白行处切，避免切断内部图表；每片登记为新页（连续页号），
-       扩入 pages，使 OCR/detect/build 按多页处理。
+       扩入 pages，使 OCR/detect/build 按多页处理。切片页号由
+       `_alloc_page_numbers` 分配，保证**各组页号互不相交**（相交会让
+       auto_chapters 把同一批页切成两篇重复文章）。
+    3. 按当前素材**重建** <out>/long_image_pages.txt（不 merge 历史），
+       并清掉页号重排后不再使用的历史切片图，避免"幽灵章节/幽灵页"。
 
     Args:
         force: True 时绕过 mtime 缓存，重新处理所有页（配合 --force 全步骤无缓存）
@@ -484,6 +554,11 @@ def prepare_images(assets_dir, pages, out, force=False,
     # 长图切分页：{源文件名: [切片页号]}——每张长图单独成章，不与其他混合
     long_image_pages = {}
     new_pages = dict(pages)
+    # 已分配页号：PDF 渲染页 + 本轮已切出的长图切片。长图分配切片页号时必须避开
+    # 它们——一旦两组页号相交，同一批页会被两个"长图组"登记，auto_chapters 就会
+    # 把同一批页切成两篇文章（见 _alloc_page_numbers 注释）。
+    used_pages = {pn for pn, f in new_pages.items()
+                  if isinstance(f, str) and f.startswith("[pdf]")}
     for n, fname in sorted(pages.items()):
         # PDF 渲染页（prepare_pdf_sources 已写入 <out>/_ocr_tmp/p{n}.jpg）源不在
         # assets_dir，指向 tmp 下已渲染文件；普通图源在 assets_dir。
@@ -504,13 +579,20 @@ def prepare_images(assets_dir, pages, out, force=False,
         # 预处理：边缘检测裁四边空白 + 去掉右侧灰色滚动条（避免误识别为内容）
         im = _trim_image(im)
         if _is_blank_image(im):
-            if os.path.isfile(dst):
+            # 仅当 p{n}.jpg 确属本文件时才删：页号 n 可能已被别的长图切片占用，
+            # 那种情况下 dst 是别人的切片，删了就丢内容。
+            if new_pages.get(n) == fname and os.path.isfile(dst):
                 os.remove(dst)
             blank += 1
             blank_pages.append(n)
             continue
 
         W, H = im.size
+        if is_pdf_page:
+            # PDF 源：src 就是成品 <out>/_ocr_tmp/p{n}.jpg 本身（render_pdf_pages 已
+            # 渲染并切好），无需再复制/转存——否则 --force 时下面 copyfile(src, dst)
+            # 是同文件，会抛 SameFileError。
+            continue
         # 超长图 → 内容感知切分。PDF 渲染页已在 render_pdf_pages 阶段按同样规则
         # 切好（每片 ratio<3），此处若再切会与后续切片页号冲突、误删相邻片 → 跳过。
         if not is_pdf_page and H > min_h and H / W >= max_ratio:
@@ -521,13 +603,13 @@ def prepare_images(assets_dir, pages, out, force=False,
             _slice_max_h = max(int(W * slice_ratio), min_h)
             cuts = _find_split_points(gray, max_h=_slice_max_h, min_h=min_h)
             if cuts:
-                # 清掉本文件可能存在的旧切片（只删属于本文件 fname 的页，
+                # 清掉本文件可能存在的旧切片/旧单页（只删属于本文件 fname 的页，
                 # 避免误删别的长图（如 8-28 的切片）被 8-29 的清理误删）
-                for pn in list(new_pages):
-                    if pn >= n and new_pages.get(pn) == fname:
-                        old = os.path.join(tmp, f"p{pn}.jpg")
-                        if os.path.isfile(old):
-                            os.remove(old)
+                for pn in [p for p, f in new_pages.items() if f == fname]:
+                    old = os.path.join(tmp, f"p{pn}.jpg")
+                    if os.path.isfile(old):
+                        os.remove(old)
+                    del new_pages[pn]
                 pts = [0] + cuts + [H]
                 # 合并过小的切片（多为尾部空白残留）：<200px 并入前一片，避免无意义的小页
                 merged = []
@@ -536,25 +618,17 @@ def prepare_images(assets_dir, pages, out, force=False,
                         merged[-1] = (merged[-1][0], y1)
                     else:
                         merged.append((y0, y1))
-                # 连续重编号：从 n 开始；若 n 已被别的文件切片占用（如 8-29 的 n=9
-                # 被 8-28 切片占用），则从最大已用页+1 起，避免两张长图切片页号重叠。
-                _pn = n
-                if new_pages.get(n) not in (None, fname):
-                    _pn = max(new_pages) + 1 if new_pages else n
-                # 只删除本文件原来的单页 p{n}.jpg（若该页属于本文件）
-                if new_pages.get(n) == fname:
-                    del new_pages[n]
-                _kept = 0
+                merged = [seg for seg in merged if seg[1] - seg[0] >= 200]
+                # 连续编号：优先从 n 开始；与已分配页号相交则整段后移（见 helper 注释）
+                _pn = _alloc_page_numbers(n, len(merged), used_pages)
                 for y0, y1 in merged:
-                    if y1 - y0 < 200:
-                        continue
                     crop = rgb.crop((0, y0, W, y1))
                     crop.save(os.path.join(tmp, f"p{_pn}.jpg"), "JPEG", quality=95)
                     new_pages[_pn] = fname_key
                     long_image_pages.setdefault(fname_key, []).append(_pn)
+                    used_pages.add(_pn)
                     _pn += 1
-                    _kept += 1
-                if _kept > 0:
+                if merged:
                     sliced += 1
                 continue
 
@@ -574,8 +648,23 @@ def prepare_images(assets_dir, pages, out, force=False,
         print(f"  已切分 {sliced} 张超长图（空白处切分，避免切到图表），"
               f"页数 {len(pages)} → {len(new_pages)}")
     write_blank_pages(out, blank_pages)
-    # 合并已有的 long_image_pages（PDF 源分组可能已由 prepare_pdf_sources 写入）
-    _lip = read_long_image_pages(out)
+    # 清掉页号重排后不再使用的历史切片图：OCR 是按 p{start}..p{end} 区间跑的，
+    # 残留的旧 p{n}.jpg 会被当成有效页 OCR，产出"幽灵页"。
+    for _f in os.listdir(tmp):
+        _m = TMP_PAGE_RE.match(_f)
+        if _m and int(_m.group(1)) not in new_pages:
+            try:
+                os.remove(os.path.join(tmp, _f))
+            except OSError:
+                pass
+    # **按当前素材重建**（不再 merge 历史）long_image_pages：素材被删除/改名或
+    # 页号被重排后，旧分组残留就会变成"幽灵章节"（auto_chapters 是逐组各自成篇，
+    # 会凭空多出重复/无源篇目）。PDF 源分组由 prepare_pdf_sources 先写入，这里从
+    # pages 的 [pdf] 标记还原，避免重建时把它洗掉。
+    _lip = {}
+    for _pn, _f in pages.items():
+        if isinstance(_f, str) and _f.startswith("[pdf]"):
+            _lip.setdefault(_f[len("[pdf]"):], []).append(_pn)
     _lip.update(long_image_pages)
     write_long_image_pages(out, _lip)
     print(f"图片预处理完成：{copied} 张 JPEG 直接复制 + {converted} 张转 JPEG"
