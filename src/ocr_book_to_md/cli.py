@@ -131,9 +131,9 @@ PDF 制作方式（pdf --type / pipeline --pdf <方式>）:
     # pipeline（全部流程，--pdf 指定最终方式）
     pipe_p = subparsers.add_parser('pipeline', help='全部流程，用 --pdf 指定最终 PDF 方式')
     pipe_p.add_argument('-p', '--project', default='.', help='项目目录')
-    pipe_p.add_argument('--pdf', dest='pdf_mode', default=None,
+    pipe_p.add_argument('--pdf', '--type', dest='pdf_mode', default=None,
                         choices=['text', 'img', 'layed'],
-                        help='最终 PDF 方式：text(文字流)/img(原图片)/layed(文字置于图)（默认读 config.pipeline.pdf 或 text）')
+                        help='最终 PDF 方式：text(文字流)/img(原图片)/layed(文字置于图)（默认读 config.pipeline.pdf 或 text；--type 为别名）')
     pipe_p.add_argument('--assets', default=None, help='输入素材目录（图片或 PDF）')
     pipe_p.add_argument('-f', '--force', action='store_true', default=None,
                         help='全部步骤不使用缓存（当前指 OCR 缓存，重跑全部页）')

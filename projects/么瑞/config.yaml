@@ -20,7 +20,7 @@ pdf:
   engine: weasyprint
   chunk_articles: 1
   page_margin: 0.5cm 1cm
-  watermark: 婉若游龙
+  watermark:
   mode: full
   font_family: Hiragino Sans GB
   toc_skip_articles: 2
