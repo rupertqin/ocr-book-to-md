@@ -143,6 +143,12 @@ def _char_width_units(ch):
     return 1.0
 
 
+# 彩色文字的亮度下限（max 通道 ≥ 此值才可能是"真彩色"，≈0.35×255）。
+# 与 _rgb_to_hue 的 mx<0.35 排除保持一致：黑字在 JPEG 里的色度噪点（如 (17,27,37)）
+# 用相对饱和度 (mx-mn)/mx 会算出 ≈0.54，必须靠亮度先排除，否则整行黑字会被误上色。
+COLOR_MIN_LUM = 89
+
+
 def _line_inline_colors(img_rgb, box, text, W, H, sat_thr=0.35, min_count=5):
     """行内逐字颜色切分：找出该行文本中真正彩色的连续字符段。
 
@@ -172,7 +178,8 @@ def _line_inline_colors(img_rgb, box, text, W, H, sat_thr=0.35, min_count=5):
     dark = lum < 185
     mx = np.maximum(np.maximum(rch, gch), bch)
     mn = np.minimum(np.minimum(rch, gch), bch)
-    sat = np.where(mx > 25, (mx - mn) / np.maximum(mx, 1), 0.0)
+    # 亮度下限：近黑像素不算彩色（否则黑字的 JPEG 色度噪点会被相对饱和度放大）
+    sat = np.where(mx >= COLOR_MIN_LUM, (mx - mn) / np.maximum(mx, 1), 0.0)
     if not dark.any():
         return []
     # 字符宽度模型 → 每字符像素列范围
@@ -224,8 +231,15 @@ def _line_inline_colors(img_rgb, box, text, W, H, sat_thr=0.35, min_count=5):
             if len(pts):
                 rgb = (int(np.median(pts[:, 0])), int(np.median(pts[:, 1])),
                        int(np.median(pts[:, 2])))
-                runs.append((i, j, rgb))
+                # 二次防线：整段代表色仍是近黑 → 是噪声/深底暗色，不是彩色文字
+                if max(rgb) >= COLOR_MIN_LUM:
+                    runs.append((i, j, rgb))
         i = j + 1
+    # 纯标点段不算强调色：标点从不承担语义强调，出现彩色标点基本是取样噪声
+    # （典型：句中一个孤零零的蓝/灰色「，」）。
+    _PUNCT = set("，。、；：！？,.;:!?…—~～（）()【】「」『』《》〈〉\"'“”‘’·-—_")
+    runs = [r for r in runs
+            if not all(ch in _PUNCT or ch.isspace() for ch in text[r[0]:r[1] + 1])]
     return runs
 
 
@@ -340,11 +354,49 @@ def _cluster_rgbs(rgbs, thresh=9.0):
     return [cl["members"] for cl in clusters]
 
 
+def _prune_dark_colors(blocks, min_lum=COLOR_MIN_LUM):
+    """清除"近黑色"的彩色标注（max 通道 < min_lum），视同无彩。
+
+    为什么需要：黑字/深底采样出的近黑 RGB（如 (17,27,37)、(46,21,0)）若进入
+    `_snap_to_semantic`，会被吸附成与正文反差极大的标准色（steelblue/sienna…），
+    渲染后整页文字花哨。这类值本身就不是"彩色文字"，直接清掉。
+    """
+    def _is_dark(rgb):
+        try:
+            return max(int(v) for v in rgb) < min_lum
+        except (TypeError, ValueError):
+            return False
+
+    for b in blocks:
+        t = b.get("type")
+        if t in ("text", "heading"):
+            if b.get("color_rgb") and _is_dark(b["color_rgb"]):
+                b["color_rgb"] = None
+                b["color_hue"] = None
+                b.pop("color_name", None)
+            spans = b.get("color_spans")
+            if spans:
+                kept = [sp for sp in spans
+                        if isinstance(sp, dict) and sp.get("color_rgb")
+                        and not _is_dark(sp["color_rgb"])]
+                if kept:
+                    b["color_spans"] = kept
+                else:
+                    b.pop("color_spans", None)
+        elif t == "table":
+            for r in b.get("rows") or []:
+                for c in r:
+                    if isinstance(c, dict) and c.get("color_rgb") and _is_dark(c["color_rgb"]):
+                        c["color_rgb"] = None
+                        c.pop("color_name", None)
+
+
 def _snap_blocks_colors(blocks, snap=True, cluster=True, thresh=9.0):
     """对 blocks 内所有彩色（text/heading/table cell）做每页"聚类→语义色吸附"。
     聚类(B)：感知距离相近色归并；吸附(A)：簇代表色吸到最近的语义标准色，
     并把簇内所有成员的 color_rgb 写为该标准色值、新增 color_name。
-    黑/灰/无彩不受影响。返回新 blocks。"""
+    黑/灰/无彩不受影响（近黑色先由 `_prune_dark_colors` 清掉）。返回新 blocks。"""
+    _prune_dark_colors(blocks)
     def _iter_colored(blks):
         for b in blks:
             if b.get("type") in ("text", "heading"):

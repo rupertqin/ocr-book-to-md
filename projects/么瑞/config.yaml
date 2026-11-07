@@ -31,4 +31,5 @@ pdf:
   show_cover: false
   numbered: false
   compress: true
+  bold_scope: all
   output_dir: dist
