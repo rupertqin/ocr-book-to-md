@@ -186,7 +186,9 @@ def prepare(project, img_dir, book_name=None):
     # 用 document-factory 的 effective_page_margin_mm：底部已 clamp 到至少
     # PAGE_NUM_MIN_BOTTOM_MM，与 @page 实际内容区一致，保证 .img-page 高度匹配。
     from .config import Config
-    from document_factory.pdf_generator import effective_page_margin_mm
+    from document_factory.actions.process.render.adapters.pdf import (
+        effective_page_margin_mm,
+    )
     cfg = Config(str(project.path))
     page_margin_str = cfg.get('pdf.page_margin', '1.5cm 2cm')
     top_mm, right_mm, bottom_mm, left_mm = effective_page_margin_mm(page_margin_str)

@@ -20,12 +20,18 @@ from typing import Optional
 class Project:
     """项目目录管理，封装 config/.env/数据/输出 路径。"""
 
-    def __init__(self, path: str = "."):
+    def __init__(self, path: str = ".", output_dir: str | None = None,
+                 assets_dir: str | None = None):
+        """``path`` 是项目根（放 config.yaml / .env）。
+
+        ``output_dir`` / ``assets_dir`` 可覆盖默认的 ``<path>/output`` 与 ``<path>/assets``：
+        被别的项目当库调用时，中间产物要落在调用方指定的工作目录里，而不是污染项目根。
+        """
         self.path = Path(path).resolve()
         self.config_file = self.path / "config.yaml"
         self.env_file = self.path / ".env"
-        self.assets_dir = self.path / "assets"
-        self.output_dir = self.path / "output"
+        self.assets_dir = Path(assets_dir).resolve() if assets_dir else self.path / "assets"
+        self.output_dir = Path(output_dir).resolve() if output_dir else self.path / "output"
 
     def __repr__(self):
         return f"Project({self.path})"

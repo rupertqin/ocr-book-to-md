@@ -10,8 +10,19 @@ ocr-book-to-md 的 `build` 产出 `output/content/article_N.md` + `images/`，
 create_pdf 参数通过 **kwargs 透传，document-factory 新增参数无需在此重复定义。
 """
 
-from document_factory.project import Project as DFProject
-from document_factory.pdf_generator import create_pdf, compress_pdf
+def _df_api():
+    """懒加载 document-factory：没装它时本包其余功能（OCR/detect/build）照常可用。"""
+    try:
+        from document_factory.actions.process.render.adapters.pdf import (
+            compress_pdf,
+            create_pdf,
+        )
+        from document_factory.infra.project import Project as DFProject
+    except ImportError as exc:      # pragma: no cover - 取决于外部安装
+        raise RuntimeError(
+            "生成 PDF 需要 document-factory（pip install -e <document-factory 目录>）；"
+            "OCR/detect/build 不需要它") from exc
+    return DFProject, create_pdf, compress_pdf
 
 # config.yaml 的 pdf.* 键 → create_pdf 参数名 的映射（仅在未显式透传时补充）
 _CONFIG_TO_CREATE = {
@@ -50,6 +61,7 @@ def make_pdf(project, config, input_dir=None, output=None, compress=None, **kwar
     Returns:
         document_factory create_pdf 返回的 PDF 路径列表。
     """
+    DFProject, create_pdf, compress_pdf = _df_api()
     df_project = DFProject(str(project.path))
 
     # 组装 create_pdf 参数：config 读取为基础，**kwargs 覆盖
@@ -98,7 +110,7 @@ def make_pdf(project, config, input_dir=None, output=None, compress=None, **kwar
     if do_compress is None and config is not None:
         do_compress = config.get('pdf.compress', False)
     if do_compress:
-        from document_factory.config import Config as DFConfig
+        from document_factory.infra.config import Config as DFConfig
         resolution = int(DFConfig(str(project.path)).get('compress.resolution', 100))
         for p in generated:
             compress_pdf(str(p), resolution=resolution)

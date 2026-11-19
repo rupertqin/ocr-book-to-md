@@ -367,7 +367,9 @@ def prepare_layed_articles(project, pages=None, base_font_pt=11.0,
     # @page margin 直接提供（与 img 流完全一致），section 内坐标以左上角为 0。
     # 用 document-factory 的 effective_page_margin_mm：底部已 clamp 到至少
     # PAGE_NUM_MIN_BOTTOM_MM，与 @page 实际内容区一致，保证 .layed-page 高度匹配。
-    from document_factory.pdf_generator import effective_page_margin_mm
+    from document_factory.actions.process.render.adapters.pdf import (
+        effective_page_margin_mm,
+    )
     top_mm, right_mm, bottom_mm, left_mm = effective_page_margin_mm(page_margin_str)
     page_w_mm = 210.0
     page_h_mm = 297.0

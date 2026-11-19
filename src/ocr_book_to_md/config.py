@@ -79,9 +79,10 @@ class Config:
     project_path 指向 `projects/<书名>/`，config.yaml 与 .env 都位于其下。
     """
 
-    def __init__(self, project_path: str = "."):
+    def __init__(self, project_path: str = ".", config_file: str | None = None):
+        """``config_file`` 显式指定配置文件时优先，否则读 ``<project_path>/config.yaml``。"""
         self.path = Path(project_path).resolve()
-        self.config_file = self.path / "config.yaml"
+        self.config_file = Path(config_file).resolve() if config_file else self.path / "config.yaml"
         self._data = None
         self._env = None
 
