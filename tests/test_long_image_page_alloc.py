@@ -15,7 +15,7 @@ build_md.auto_chapters 逐组各自成篇，于是同一批页被切成两篇文
 import numpy as np
 from PIL import Image, ImageDraw
 
-from ocr_book_to_md import ocr as O
+from p2md import ocr as O
 
 
 def test_prefers_original_page_number_when_free():

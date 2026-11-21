@@ -1,5 +1,5 @@
-projects/*/data/
-projects/*/output/
+# 本地项目数据与工作目录（不入库、不打包）
+/projects/
 
 # 环境变量（含敏感信息）
 .env

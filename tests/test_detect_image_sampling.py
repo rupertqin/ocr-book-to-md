@@ -15,7 +15,7 @@ import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr_book_to_md import detect as D
+from p2md import detect as D
 
 _FONT = None
 _GEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),

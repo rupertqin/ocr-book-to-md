@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from ocr_book_to_md import build_md as BM
+from p2md import build_md as BM
 
 
 def _write(blocks_dir, n, blocks):

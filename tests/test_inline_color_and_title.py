@@ -13,8 +13,8 @@ import tempfile
 
 import numpy as np
 
-from ocr_book_to_md import detect as D
-from ocr_book_to_md import build_md as BM
+from p2md import detect as D
+from p2md import build_md as BM
 
 
 def _make_row_img(text, colored_idx, fg_green=(60, 179, 113),

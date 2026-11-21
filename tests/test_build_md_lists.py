@@ -20,7 +20,7 @@ import tempfile
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr_book_to_md import build_md as BM
+from p2md import build_md as BM
 
 _GEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_generated")
 _FONT_CACHE = {}

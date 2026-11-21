@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from ocr_book_to_md import ocr_fix as F
+from p2md import ocr_fix as F
 
 
 def _page(lines, body_n=20):

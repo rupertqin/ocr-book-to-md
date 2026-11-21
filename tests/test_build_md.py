@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 
-from ocr_book_to_md import build_md
+from p2md import build_md
 
 
 def _make_blocks_dir(tmp, pages):

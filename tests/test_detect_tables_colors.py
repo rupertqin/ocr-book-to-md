@@ -15,7 +15,7 @@ import os
 
 from PIL import Image, ImageDraw, ImageFont
 
-from ocr_book_to_md import detect as D
+from p2md import detect as D
 
 _GEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_generated")
 _FONT_CACHE = {}
@@ -240,7 +240,7 @@ def test_snap_blocks_colors_keeps_gray_uncolored():
 
 def test_snap_blocks_colors_table_cells():
     # table cell 中的彩色同样吸附 + 标语义名；无彩 cell 保持 None
-    from ocr_book_to_md import detect as Dd
+    from p2md import detect as Dd
     cell_red = {"text": "格力", "color_rgb": [232, 102, 122]}
     cell_black = {"text": "双汇", "color_rgb": None}
     tb = {"type": "table", "y_top": 100,

@@ -1,29 +1,51 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ocr-book-to-md"
-version = "0.1.0"
-description = "扫描书转 Markdown（OCR → 图 / 标题 / 正文三分），输出可嵌入 document-factory PDF 流程"
+name = "p2md"
+version = "0.2.0"
+description = "Local OCR → structured Markdown for scanned books and long screenshots (no LLM, macOS Vision / RapidOCR)"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "p2md contributors"}]
+keywords = ["ocr", "markdown", "scanned-book", "vision", "rapidocr"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
 dependencies = [
-    "Pillow",
-    "numpy",
-    "pyyaml",
-    "document-factory",   # 库方式调用，需先安装（本地：pip install -e /Volumes/T9/code/document-factory）
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "scipy>=1.10",
+    "rapidocr>=3.10; sys_platform != 'darwin'",
+    "onnxruntime>=1.20; sys_platform != 'darwin'",
 ]
 
 [project.optional-dependencies]
-test = [
-    "pytest>=7.0",
-]
+test = ["pytest>=7.0"]
+build = ["build>=1.0", "twine>=5.0"]
+pdf = ["PyMuPDF>=1.23"]
+rapidocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]
 
 [project.scripts]
-ocr-book-to-md = "ocr_book_to_md.cli:main"
+p2md = "p2md.cli:main"
+ocr-book-to-md = "p2md.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+p2md = ["ocr_batch.swift"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from ocr_book_to_md.build_md import _find_long_image_title_line  # noqa: E402
+from p2md.build_md import _find_long_image_title_line  # noqa: E402
 
 
 def _make_project(tmp_path, lines):
