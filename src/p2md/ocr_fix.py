@@ -187,7 +187,7 @@ def run_global_fix(project, log=print) -> int:
     """
     from .config import Config
     cfg = Config(str(project.path))
-    enabled = cfg.get("detect.ocr_fix_global", True)
+    enabled = cfg.get_p2md("ocr_fix_global", True)
     if not enabled:
         return 0
     ocr_dir = str(project.get_ocr_pages_json_dir())

@@ -2,7 +2,8 @@
 """p2md 统一 CLI：init / pdftotext / ocr / detect / build / pipeline。
 
 只产出 Markdown 与裁图；不生成 PDF，不依赖 document-factory。
-OCR 在 macOS 用 Swift Vision，其他平台用 RapidOCR。
+OCR 默认在 macOS 用 Swift Vision，其他平台用 RapidOCR；
+可用 --engine / P2MD_ENGINE / config.yaml 的 p2md.engine 切换。
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ def _parser() -> argparse.ArgumentParser:
 命令:
   init        初始化项目（生成 config.yaml + .env + assets/）
   pdftotext   PDF 文字层直取 Markdown（无文字层的扫描 PDF 用 pipeline）
-  ocr         OCR → output/ocr/（macOS: Vision；其他平台: RapidOCR）
+  ocr         OCR → output/ocr/（--engine 可选 auto/swift/rapidocr）
   detect      版面分析 → output/blocks + output/figs
   build       组装章节 → output/md + output/content/article_N.md
   pipeline    全部流程：ocr → detect → build
@@ -52,7 +53,7 @@ def _parser() -> argparse.ArgumentParser:
   p2md build -p ./projects/进化心理学
         """
     )
-    parser.add_argument('--version', action='version', version='p2md 0.2.0')
+    parser.add_argument('--version', action='version', version='p2md 0.3.0')
     sub = parser.add_subparsers(dest='command', help='可用命令')
 
     init_p = sub.add_parser('init', help='初始化项目')
@@ -70,6 +71,8 @@ def _parser() -> argparse.ArgumentParser:
     ocr_p.add_argument('--end', type=int, default=None, help='结束页')
     ocr_p.add_argument('-f', '--force', action='store_true', default=None,
                        help='忽略 OCR 缓存，重跑全部页')
+    ocr_p.add_argument('--engine', choices=('auto', 'swift', 'rapidocr'),
+                       default=None, help='OCR 引擎（覆盖环境变量与配置；默认按平台）')
 
     det_p = sub.add_parser('detect', help='布局分析步骤')
     det_p.add_argument('-p', '--project', default='.', help='项目目录')
@@ -85,6 +88,8 @@ def _parser() -> argparse.ArgumentParser:
     pipe_p.add_argument('--assets', default=None, help='输入素材目录（图片或 PDF）')
     pipe_p.add_argument('-f', '--force', action='store_true', default=None,
                         help='忽略 OCR 缓存，重跑全部页')
+    pipe_p.add_argument('--engine', choices=('auto', 'swift', 'rapidocr'),
+                        default=None, help='OCR 引擎（覆盖环境变量与配置；默认按平台）')
     return parser
 
 
@@ -142,10 +147,11 @@ def main() -> None:
     if args.command == 'ocr':
         from . import ocr as ocr_mod
         assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
-        force = args.force if args.force is not None else config.get_force_ocr()
+        force = args.force if args.force is not None else config.get_force()
         img_for_ocr, _start, _end = ocr_mod.run(
             project, assets, start=args.start or config.get_start_page(),
-            end=args.end or config.get_end_page(), force_ocr=force)
+            end=args.end or config.get_end_page(), force=force,
+            engine=args.engine)
         print(f"OCR 完成。detect 将使用预处理图目录: {img_for_ocr}")
         _print_summary(project)
         return
@@ -176,10 +182,11 @@ def main() -> None:
         from .middleware import run_all as run_ocr_hooks
 
         assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
-        force = args.force if args.force is not None else config.get_force_ocr()
+        force = args.force if args.force is not None else config.get_force()
 
         print("=" * 40, "\n① OCR\n", "=" * 40, sep='')
-        img_for_ocr, _start, _end = ocr_mod.run(project, assets, force_ocr=force)
+        img_for_ocr, _start, _end = ocr_mod.run(
+            project, assets, force=force, engine=args.engine)
 
         print("=" * 40, "\n② 布局分析\n", "=" * 40, sep='')
         run_ocr_hooks(project)

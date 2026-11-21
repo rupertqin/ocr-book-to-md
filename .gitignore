@@ -17,3 +17,7 @@ tests/_generated/
 
 # 其他
 .DS_Store
+
+# IDE / 测试工具本地数据
+.codebuddy
+.pytest_cache

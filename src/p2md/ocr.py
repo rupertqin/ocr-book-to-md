@@ -7,7 +7,7 @@
   x/y/w/h 归一化、原点左下（与 Vision 的 boundingBox 一致）。
 
 通用能力：源图预处理为 JPEG（规避 ImageIO 解 PNG 的 SIGBUS）、超长图按段落切分、
-空白页过滤、OCR 缓存复用（force_ocr 控制）。
+空白页过滤、OCR 缓存复用（force 控制）。
 """
 
 import json
@@ -137,23 +137,41 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
         print("OCR 全部完成，无崩溃页。")
 
 
-def resolve_ocr_backend(config=None):
-    """选择 OCR 后端：配置 > 环境变量 > 平台默认。
+VALID_ENGINES = ("swift", "rapidocr")
 
-    默认 macOS 用 Swift Vision，其他平台用 RapidOCR。
-    配置键 ``book.ocr_backend`` / 环境变量 ``P2MD_OCR_BACKEND`` 可强制指定
-    ``swift`` 或 ``rapidocr``（跨平台测试/迁移时用）。
+
+def resolve_engine(config=None, override=None):
+    """选择 OCR 引擎：显式参数 > 环境变量 > 配置 > 平台默认。
+
+    - ``override``：CLI ``--engine`` / 库调用传入的显式选择（最高优先级）。
+    - 环境变量 ``P2MD_ENGINE``：覆盖项目配置，便于临时切换。
+    - 项目配置 ``p2md.engine``（.env 对应 ``P2MD_ENGINE``）。
+    - 旧名 ``P2MD_OCR_BACKEND`` / ``book.ocr_backend`` 仍兼容。
+    - ``auto`` 或未指定时按平台默认：macOS → Swift Vision，其他 → RapidOCR。
     """
-    import os as _os
-    value = _os.environ.get("P2MD_OCR_BACKEND")
+    value = override
+    if not value:
+        value = os.environ.get("P2MD_ENGINE") or os.environ.get("P2MD_OCR_BACKEND")
+    if not value and config is not None:
+        try:
+            value = config.get_engine()
+        except Exception:
+            value = None
     if not value and config is not None:
         try:
             value = config.get('book.ocr_backend', None)
         except Exception:
             value = None
-    if value in ("swift", "rapidocr"):
-        return value
-    return "swift" if sys.platform == "darwin" else "rapidocr"
+    if value is None:
+        value = "auto"
+    normalized = str(value).strip().lower()
+    if normalized in VALID_ENGINES:
+        return normalized
+    if normalized in ("", "auto"):
+        return "swift" if sys.platform == "darwin" else "rapidocr"
+    raise SystemExit(
+        f"错误：未知 OCR 引擎 {value!r}，可选 auto / swift / rapidocr"
+    )
 
 
 def convert_rapidocr_result(result, width, height):
@@ -194,7 +212,8 @@ def run_ocr_rapidocr(img_dir, txt_dir, json_dir, start, end, force=False):
         from PIL import Image
     except ImportError as exc:
         raise SystemExit(
-            "错误：当前平台默认使用 RapidOCR，但未安装。请 pip install 'p2md[rapidocr]'"
+            "错误：当前选择 RapidOCR，但未安装。请 pip install 'p2md[rapidocr]'，"
+            "或改用 --engine swift / engine: swift"
         ) from exc
 
     if force:
@@ -774,14 +793,15 @@ def prepare_images(assets_dir, pages, out, force=False,
     return tmp, new_pages
 
 
-def run(project, assets_dir, start=None, end=None, force_ocr=False):
+def run(project, assets_dir, start=None, end=None, force=False, engine=None):
     """对项目执行 OCR 步骤。
 
     Args:
         project: Project 实例
         assets_dir: 源图目录（已解析）
         start/end: 页码范围（None=自动探测）
-        force_ocr: 是否忽略 OCR 缓存
+        force: 是否忽略 OCR 缓存
+        engine: 显式指定 OCR 引擎（auto/swift/rapidocr），None=走配置/环境/平台默认
     Returns:
         (img_for_ocr, start, end)：预处理后的图目录与最终范围
     """
@@ -793,9 +813,9 @@ def run(project, assets_dir, start=None, end=None, force_ocr=False):
     # 超长图/超长 PDF 页切分参数（可配置）
     from .config import Config
     _cfg = Config(str(project.path))
-    backend = resolve_ocr_backend(_cfg)
+    engine = resolve_engine(_cfg, override=engine)
     bin_path = None
-    if backend == "swift":
+    if engine == "swift":
         bin_path = os.path.join(ocr_cache, "ocr_batch")
         if not os.path.exists(bin_path):
             if not SWIFT_SRC.exists():
@@ -805,16 +825,16 @@ def run(project, assets_dir, start=None, end=None, force_ocr=False):
     pages = scan_pages(assets_dir)
     print(f"图片页: {len(pages)}")
 
-    _max_ratio = float(_cfg.get('book.split_long_image_max_ratio', 3.0))
-    _max_h = int(_cfg.get('book.split_slice_max_h', 2600))
-    _min_h = int(_cfg.get('book.split_slice_min_h', 1400))
-    _slice_ratio = float(_cfg.get('book.split_slice_ratio', 3.0))
+    _max_ratio = float(_cfg.get_p2md('split_long_image_max_ratio', 3.0))
+    _max_h = int(_cfg.get_p2md('split_slice_max_h', 2600))
+    _min_h = int(_cfg.get_p2md('split_slice_min_h', 1400))
+    _slice_ratio = float(_cfg.get_p2md('split_slice_ratio', 3.0))
 
     # PDF 源：assets 里的 .pdf 渲染成页图（_ocr_tmp/p{n}.jpg），登记 long_image_pages
     # 渲染时对"单页即超长滚动截图"的 PDF 页也做切分（页号连续顺延）。
     from .pdfsource import prepare_pdf_sources
     pages, _pdf_pages = prepare_pdf_sources(
-        assets_dir, out, pages, force=force_ocr,
+        assets_dir, out, pages, force=force,
         max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
         slice_ratio=_slice_ratio)
     if not pages:
@@ -825,7 +845,7 @@ def run(project, assets_dir, start=None, end=None, force_ocr=False):
     print(f"共 {len(pages)} 页，OCR 范围 p{start}..p{end}")
 
     img_for_ocr, pages = prepare_images(
-        assets_dir, pages, out, force=force_ocr,
+        assets_dir, pages, out, force=force,
         max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
         slice_ratio=_slice_ratio)
 
@@ -836,21 +856,21 @@ def run(project, assets_dir, start=None, end=None, force_ocr=False):
     if rng2:
         start = min(start, rng2[0]) if start is not None else rng2[0]
 
-    if os.path.isdir(os.path.join(ocr_cache, "pages_json")) and not force_ocr:
+    if os.path.isdir(os.path.join(ocr_cache, "pages_json")) and not force:
         print("复用 OCR 缓存:", ocr_cache)
     else:
         os.makedirs(project.get_ocr_pages_dir(), exist_ok=True)
         os.makedirs(project.get_ocr_pages_json_dir(), exist_ok=True)
-        if backend == "swift":
+        if engine == "swift":
             print("运行 OCR（macOS Vision, zh-Hans + en）...")
             run_ocr_resilient(bin_path, img_for_ocr,
                               str(project.get_ocr_pages_dir()),
                               str(project.get_ocr_pages_json_dir()),
-                              start, end, reuse_broken=False, force=force_ocr)
+                              start, end, reuse_broken=False, force=force)
         else:
             print("运行 OCR（RapidOCR, 中文小模型）...")
             run_ocr_rapidocr(img_for_ocr,
                              str(project.get_ocr_pages_dir()),
                              str(project.get_ocr_pages_json_dir()),
-                             start, end, force=force_ocr)
+                             start, end, force=force)
     return img_for_ocr, start, end

@@ -59,14 +59,14 @@ def _run_script(project, rel, log_label):
 
 
 def run_middlewares(project):
-    """运行项目配置的全部 OCR 中间件脚本（detect.middlewares 列表，按序执行）。
+    """运行项目配置的全部 OCR 中间件脚本（p2md.middlewares 列表，按序执行）。
 
-    向后兼容：若未配 middlewares，回退读旧单键 detect.middleware（清理）与
-    detect.ocr_fix（纠错）。返回运行脚本数。
+    向后兼容：若未配 middlewares，回退读旧单键 p2md.middleware / detect.middleware
+    （清理）与 p2md.ocr_fix / detect.ocr_fix（纠错）。返回运行脚本数。
     """
     from .config import Config
     cfg = Config(str(project.path))
-    mws = cfg.get("detect.middlewares", None)
+    mws = cfg.get_p2md("middlewares", None)
     if mws:
         n = 0
         for i, item in enumerate(mws):
@@ -85,10 +85,10 @@ def run_middlewares(project):
         return n
     # 旧单键回退
     ran = 0
-    ran += _run_script(project, cfg.get("detect.middleware", None), "清理中间件") \
-        if cfg.get("detect.middleware", None) else 0
-    ran += _run_script(project, cfg.get("detect.ocr_fix", None), "纠错钩子") \
-        if cfg.get("detect.ocr_fix", None) else 0
+    ran += _run_script(project, cfg.get_p2md("middleware", None), "清理中间件") \
+        if cfg.get_p2md("middleware", None) else 0
+    ran += _run_script(project, cfg.get_p2md("ocr_fix", None), "纠错钩子") \
+        if cfg.get_p2md("ocr_fix", None) else 0
     return ran
 
 
@@ -96,8 +96,8 @@ def run_all(project):
     """detect 前一次性运行全部 OCR 处理：per-project 中间件 → 内置通用纠错。
 
     顺序固定：
-      1) per-project 中间件脚本（detect.middlewares 列表，如清理头部→纠错形近字）
-      2) 内置通用纠错（ocr_fix.py GLOBAL_*，默认全项目；config detect.ocr_fix_global:false 关）
+      1) per-project 中间件脚本（p2md.middlewares 列表，如清理头部→纠错形近字）
+      2) 内置通用纠错（ocr_fix.py GLOBAL_*，默认全项目；p2md.ocr_fix_global:false 关）
     """
     run_middlewares(project)
     from .ocr_fix import run_global_fix

@@ -50,7 +50,7 @@ def _call(stage: str, fn, *args, **kwargs):
 
 
 def convert_images(project_dir, *, assets_dir=None, output_dir=None, work_root=None,
-                   start=None, end=None, force=False, chapters=None,
+                   start=None, end=None, force=False, chapters=None, engine=None,
                    log: Optional[Callable[[str], None]] = None) -> ConvertResult:
     """把一个图片集转成章节 Markdown。
 
@@ -62,6 +62,7 @@ def convert_images(project_dir, *, assets_dir=None, output_dir=None, work_root=N
         start/end: 页码范围（None=自动）。
         force: 忽略 OCR 缓存重跑。
         chapters: 人工章节结构（透传 build）。
+        engine: OCR 引擎（auto/swift/rapidocr），None=走配置/环境/平台默认。
         log: 日志回调，默认不打印（库调用不该刷屏）。
 
     Returns:
@@ -87,7 +88,7 @@ def convert_images(project_dir, *, assets_dir=None, output_dir=None, work_root=N
 
     say(f"[ocr] 源 {src} → 中间产物 {work}")
     img_dir, _start, _end = _call("ocr", ocr.run, project, str(src),
-                                  start, end, force_ocr=force)
+                                  start, end, force=force, engine=engine)
 
     say("[middleware] 逐页修正")
     _call("middleware", middleware.run_all, project)
@@ -127,12 +128,12 @@ def convert_images(project_dir, *, assets_dir=None, output_dir=None, work_root=N
 
 
 def convert(project_dir, *, assets_dir=None, output_dir=None, work_root=None,
-            start=None, end=None, force=False, chapters=None,
+            start=None, end=None, force=False, chapters=None, engine=None,
             log: Optional[Callable[[str], None]] = None) -> ConvertResult:
     """:func:`convert_images` 的短别名：``p2md.convert(project, ...)`` 一句话转完。"""
     return convert_images(project_dir, assets_dir=assets_dir, output_dir=output_dir,
                           work_root=work_root, start=start, end=end, force=force,
-                          chapters=chapters, log=log)
+                          chapters=chapters, engine=engine, log=log)
 
 
 __all__ = ["ConvertError", "ConvertResult", "convert", "convert_images"]

@@ -1536,23 +1536,23 @@ def detect(project, img_dir, pages=None):
     # 彩色标题（`##`）最小行高比例（跨页面统一基准）：
     # 真标题字号明显大于正文（"悖论系列N"1.31+/"第X章"1.29+），
     # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27×）。设 1.28 过滤后者。
-    # 可配置 detect.min_heading_ratio。
+    # 可配置 p2md.min_heading_ratio。
     from .config import Config
     _cfg = Config(str(project.path))
-    min_heading_ratio = float(_cfg.get('detect.min_heading_ratio', 1.28))
-    # 加粗判定阈值（相对笔画粗细）。可配置 detect.bold_thickness_ratio。
-    bold_thickness_ratio = float(_cfg.get('detect.bold_thickness_ratio', 0.078))
+    min_heading_ratio = float(_cfg.get_p2md('min_heading_ratio', 1.28))
+    # 加粗判定阈值（相对笔画粗细）。可配置 p2md.bold_thickness_ratio。
+    bold_thickness_ratio = float(_cfg.get_p2md('bold_thickness_ratio', 0.078))
     # 非彩色标题最小行高比例（默认 1.18）。长图文章标题常只比正文大 ~1.1×，
-    # 需调低才能识别。可配置 detect.heading_plain_ratio。
-    plain_heading_ratio = float(_cfg.get('detect.heading_plain_ratio', 1.18))
+    # 需调低才能识别。可配置 p2md.heading_plain_ratio。
+    plain_heading_ratio = float(_cfg.get_p2md('heading_plain_ratio', 1.18))
     # 标题行高基准：true(默认)=本页所属**长图组**的像素正文行高中位；false=全书归一化中位数。
     # 长图被切成多片（同字号、切片高不同），归一化行高跨片不可比；多张不同字号长图混排时
     # 全书基准又会被大字号图主导。按"页→长图分组"聚合同组切片的像素行高最稳。
-    page_heading_base = bool(_cfg.get('detect.heading_page_base', True))
+    page_heading_base = bool(_cfg.get_p2md('heading_page_base', True))
     # 加粗归一化：true(默认)=除以该页所属**长图组**的像素正文中位行高；false=除以本行 OCR 高。
     # OCR 把同一视觉行拆成多段时各段高不同，除以段高会使加粗判定不一致；
     # 用组级字号尺度归一化则加粗 = 笔画绝对粗细/组字号，与 OCR 段高无关。
-    bold_use_page_h = bool(_cfg.get('detect.bold_use_page_h', True))
+    bold_use_page_h = bool(_cfg.get_p2md('bold_use_page_h', True))
 
     if not os.path.isdir(json_dir):
         raise SystemExit(f"错误：未找到 OCR 坐标目录 {json_dir}\n"

@@ -24,7 +24,7 @@ pip install p2md
 ```
 
 - macOS 需要 `swiftc`（Xcode Command Line Tools）；首次运行会编译包内的 `ocr_batch.swift`。
-- 非 macOS 已自动安装 RapidOCR；如需在 macOS 强制使用 RapidOCR：`pip install "p2md[rapidocr]"` 并设 `P2MD_OCR_BACKEND=rapidocr`（或在 `config.yaml` 配 `book.ocr_backend: rapidocr`）。
+- 非 macOS 已自动安装 RapidOCR；如需在 macOS 强制使用 RapidOCR：`pip install "p2md[rapidocr]"`，然后用 `p2md ocr/pipeline --engine rapidocr`、设 `P2MD_ENGINE=rapidocr`，或在 `config.yaml` 的 `p2md.engine` 配 `rapidocr`。
 - 需要把 PDF 作为输入（渲染页图 / 提取文字层）时安装：`pip install "p2md[pdf]"`。
 
 ## 快速开始（CLI）
@@ -33,6 +33,8 @@ pip install p2md
 p2md init -p ./projects/进化心理学
 # 把截图或 PDF 放进 projects/进化心理学/assets/
 p2md pipeline -p ./projects/进化心理学
+# 显式指定 OCR 引擎（auto / swift / rapidocr）
+p2md pipeline -p ./projects/进化心理学 --engine rapidocr
 ```
 
 分步执行：
@@ -61,11 +63,12 @@ result = p2md.convert(
     assets_dir=None,      # 默认 <project>/assets
     output_dir="./out",   # 最终 Markdown 复制到这里（可选）
     force=False,
+    engine=None,          # auto / swift / rapidocr；None=按配置
 )
 print(result.pages, len(result.markdowns))
 ```
 
-- `convert(project_dir, *, assets_dir, output_dir, work_root, start, end, force, chapters, log)` 一次跑完 `ocr → detect → build`。
+- `convert(project_dir, *, assets_dir, output_dir, work_root, start, end, force, chapters, engine, log)` 一次跑完 `ocr → detect → build`。
 - `convert_images(...)` 是同义函数；返回 `ConvertResult(markdowns, images, pages, work_root, warnings)`。
 - 失败抛 `ConvertError`（底层 `SystemExit` 已统一转换）。
 
@@ -85,24 +88,101 @@ projects/<书名>/
         └── images/       # 裁图，article 内引用 images/xxx.png
 ```
 
-## 配置要点（`config.yaml`）
+## 参数参考
+
+### CLI 参数
+
+| 命令 | 参数 | 默认值 | 说明 |
+|---|---|---|---|
+| 全局 | `--version` | — | 输出版本号 |
+| `init` | `-p, --project` | `.` | 项目目录；生成 `config.yaml`、`.env` 模板和 `assets/` |
+| `pdftotext` | `-p, --project` | `.` | 项目目录 |
+| | `--dpi` | `150` | PDF 内嵌图片渲染 DPI |
+| | `--out` | `output/pdf_text/` | Markdown 输出目录 |
+| `ocr` | `-p, --project` | `.` | 项目目录 |
+| | `--assets` | `p2md.assets_dir` 或 `assets/` | 输入图片/PDF 目录 |
+| | `--start` / `--end` | 自动探测 | OCR 页码范围 |
+| | `-f, --force` | `p2md.force` | 忽略 OCR 缓存，重跑全部页 |
+| | `--engine` | `p2md.engine` 或平台默认 | `auto` / `swift` / `rapidocr` |
+| `detect` | `-p, --project` | `.` | 项目目录 |
+| | `--assets` | `_ocr_tmp/` 或 `assets/` | 预处理后的页图目录 |
+| | `pages` | 全部页 | 仅处理指定页号（调试用） |
+| `build` | `-p, --project` | `.` | 项目目录 |
+| | `--chapters` | 自动分章 | 人工章节结构 JSON 路径 |
+| `pipeline` | `-p, --project` | `.` | 项目目录 |
+| | `--assets` | `p2md.assets_dir` 或 `assets/` | 输入图片/PDF 目录 |
+| | `-f, --force` | `p2md.force` | 忽略 OCR 缓存 |
+| | `--engine` | `p2md.engine` 或平台默认 | `auto` / `swift` / `rapidocr` |
+
+### `config.yaml` 的 `p2md:` 参数
 
 ```yaml
-book:
+p2md:
   name: "进化心理学"
+  engine: auto
+  renderTypeOfPdf: ""
   assets_dir: assets
-  ocr_backend: auto        # auto / swift / rapidocr
-  force_ocr: false
+  force: false
+  start_page: null
+  end_page: null
   split_long_image_max_ratio: 3.0
   split_slice_max_h: 2600
   split_slice_min_h: 1400
-detect:
+  split_slice_ratio: 3.0
   min_heading_ratio: 1.28
   bold_thickness_ratio: 0.078
   heading_plain_ratio: 1.18
+  heading_page_base: true
+  bold_use_page_h: true
+  ocr_fix_global: true
+  middlewares: []
 ```
 
-优先级：命令行 > `.env` > `config.yaml` > 默认值。`.env` 的 KEY 是配置点号路径的大写下划线形式（如 `book.name` → `BOOK_NAME`）。
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `name` | `""` | 项目名；空值取项目目录名 |
+| `engine` | `auto` | OCR 引擎：`auto` 按平台选（macOS→`swift`，其他→`rapidocr`），也可强制 `swift` / `rapidocr` |
+| `renderTypeOfPdf` | `""` | PDF 渲染类型标记（如 `layed`）；兼容旧 `pipeline.pdf`。当前仅保存该值，不切换 OCR 渲染流程 |
+| `assets_dir` | `assets` | 输入素材目录，相对项目目录解析；可放 `.png` / `.jpg` / `.pdf` |
+| `force` | `false` | 忽略 OCR 缓存并重跑全部页；等价 CLI `-f` / `--force` |
+| `start_page` | `null` | 起始页；`null` 为自动探测 |
+| `end_page` | `null` | 结束页；`null` 为自动探测 |
+| `split_long_image_max_ratio` | `3.0` | 高/宽比超过该值视为超长图并切片；`0` 关闭切片 |
+| `split_slice_max_h` | `2600` | 长图切片最大高度（px） |
+| `split_slice_min_h` | `1400` | 长图切片最小高度（px） |
+| `split_slice_ratio` | `3.0` | 切片高/宽比上限；调大可保护图表不被切 |
+| `min_heading_ratio` | `1.28` | 标题/正文字号最小比例；调高更严格，调低保留小标题 |
+| `bold_thickness_ratio` | `0.078` | 加粗判定阈值（笔画宽/行高）；调高更严格 |
+| `heading_plain_ratio` | `1.18` | 非彩色标题最小字号比例；长图标题可调低到 `1.05` |
+| `heading_page_base` | `true` | `true` 按长图组的像素正文中位统一字号基准；`false` 用全书基准 |
+| `bold_use_page_h` | `true` | `true` 用组级字号归一化加粗；`false` 用每行 OCR 高度（同一视觉行易不一致） |
+| `ocr_fix_global` | `true` | 是否启用内置通用 OCR 纠错；RapidOCR 错字形态不同，可按项目关闭 |
+| `middlewares` | `[]` | OCR 后、detect 前执行的脚本列表；脚本须定义 `process(ocr_dir, project_path)` |
+
+优先级：命令行 > `.env` > `config.yaml` 的 `p2md.*` > 旧 `book.*` / `detect.*` / `pipeline.pdf` > 默认值。`.env` 的 KEY 是配置路径大写下划线形式，例如 `p2md.name` → `P2MD_NAME`、`p2md.engine` → `P2MD_ENGINE`、`p2md.renderTypeOfPdf` → `P2MD_RENDERTYPEOFPDF`。旧键只在代码中兼容，文档与模板只展示 `p2md.*`。
+
+### Python API 参数
+
+```python
+p2md.convert(
+    project_dir, *, assets_dir=None, output_dir=None, work_root=None,
+    start=None, end=None, force=False, chapters=None, engine=None, log=None,
+)
+```
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `project_dir` | 必填 | 项目根目录，读取其中 `config.yaml` / `.env` |
+| `assets_dir` | `None` | 源页图目录；`None` 表示 `<project_dir>/assets` |
+| `output_dir` | `None` | 最终 Markdown 复制目标；`None` 时只留在 `work_root` |
+| `work_root` | `None` | 中间产物目录；默认 `<project>/.derived/ocr/<assets 目录名>` |
+| `start` / `end` | `None` | OCR 页码范围；`None` 自动 |
+| `force` | `False` | 忽略 OCR 缓存重跑 |
+| `chapters` | `None` | 人工章节结构（透传 build） |
+| `engine` | `None` | `auto` / `swift` / `rapidocr`；`None` 走配置/环境/平台默认 |
+| `log` | `None` | 日志回调 `Callable[[str], None]`；默认静默 |
+
+`convert_images(...)` 与 `convert(...)` 参数相同。返回 `ConvertResult(markdowns, images, pages, work_root, warnings)`；失败抛 `ConvertError`。
 
 ## 输出格式
 
