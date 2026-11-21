@@ -72,7 +72,8 @@ def _find_long_image_title_line(blocks_dir, first_page):
       1) 位于首片顶部区域（y_top ≤ 35% 页高）；
       2) 含中日韩文字 —— 天然排除状态栏/时间/电量等行（"11:22"、"×11 85"、"•"）；
       3) 不以 "：" / ":" 结尾 —— 排除"上证指数："这类节标签；
-      4) 候选中取**行高最大**者（标题字号显著大于正文与头部元信息），并列取更长者。
+      4) 候选中取**最靠上**者（长图文章标题固定在首片顶部元信息之前/紧随其后，
+         正文行即便行高略大也不能抢走标题），并列时取行高更大者。
     """
     pages_json = os.path.join(os.path.dirname(os.path.abspath(blocks_dir)),
                               "ocr", "pages_json", f"{first_page}.json")
@@ -97,7 +98,9 @@ def _find_long_image_title_line(blocks_dir, first_page):
             cands.append((t, y_top, h))
     if not cands:
         return None
-    return max(cands, key=lambda c: (c[2], len(c[0])))
+    # 标题在长图首片最顶部；正文行字号可能略大（如么瑞 p101：标题 h=0.0174、
+    # 正文 h=0.0176），按行高最大会误把正文当标题。改为优先 y_top 最小。
+    return min(cands, key=lambda c: (c[1], -c[2], -len(c[0])))
 
 
 def _long_image_title_from_ocr(blocks_dir, first_page):
