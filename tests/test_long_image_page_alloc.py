@@ -12,6 +12,8 @@ build_md.auto_chapters 逐组各自成篇，于是同一批页被切成两篇文
      被打散导致跨页渲染顺序错乱）。
 """
 
+import os
+
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -154,3 +156,47 @@ def test_lip_rebuild_drops_phantom_groups(tmp_path):
 
     assert groups == {}
     assert set(new_pages) == {1}
+
+
+def _long_jpeg(path, size=(200, 3000)):
+    im = Image.new("RGB", size, "white")
+    d = ImageDraw.Draw(im)
+    for y in range(10, size[1] - 10, 60):
+        d.rectangle([20, y, size[0] - 20, y + 18], fill=(20, 20, 20))
+    im.save(path, "JPEG", quality=90)
+
+
+def test_slices_do_not_overwrite_regular_pages(tmp_path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _long_jpeg(assets / "long.jpg")
+    _jpeg_with_content(assets / "b.jpg")
+    out = tmp_path / "out"
+    (out / "_ocr_tmp").mkdir(parents=True)
+
+    _, new_pages = O.prepare_images(
+        str(assets), {1: "long.jpg", 2: "b.jpg"}, str(out), force=True,
+        max_ratio=3, max_h=500, min_h=200, slice_ratio=10)
+
+    long_pages = [p for p, f in new_pages.items() if f == "long.jpg"]
+    assert len(long_pages) > 1
+    assert new_pages.get(2) == "b.jpg"
+    assert 2 not in long_pages
+    assert O.read_long_image_pages(str(out)).get("long.jpg") == long_pages
+
+
+def test_split_slice_max_h_is_respected(tmp_path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _long_jpeg(assets / "long.jpg")
+    out = tmp_path / "out"
+    (out / "_ocr_tmp").mkdir(parents=True)
+
+    tmp, new_pages = O.prepare_images(
+        str(assets), {1: "long.jpg"}, str(out), force=True,
+        max_ratio=3, max_h=500, min_h=200, slice_ratio=20)
+
+    heights = [Image.open(os.path.join(tmp, f"p{p}.jpg")).size[1]
+               for p in new_pages]
+    assert len(heights) > 1
+    assert max(heights) <= 500

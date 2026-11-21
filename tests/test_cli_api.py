@@ -85,7 +85,7 @@ def test_api_ignores_config_files(monkeypatch, tmp_path):
 
 
 def test_api_rejects_missing_images(tmp_path):
-    with pytest.raises(api.ConvertError, match="图片目录不存在"):
+    with pytest.raises(api.ConvertError, match="图片目录或文件不存在"):
         api.convert_images(str(tmp_path / "missing"))
 
 
@@ -93,19 +93,19 @@ def test_config_file_loader_aliases_and_base(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(
         "p2md:\n"
-        "  name: ignored\n"
         "  assets_dir: assets\n"
-        "  output: output\n"
+        "  work: work\n"
+        "  output: final\n"
         "  start_page: 3\n"
         "  engine: rapidocr\n",
         encoding="utf-8",
     )
     values, base = config_file.load_config(str(path))
     assert values["images_dir"] == "assets"
-    assert values["work_dir"] == "output"
+    assert values["work_dir"] == "work"
+    assert values["out_dir"] == "final"
     assert values["start"] == 3
     assert values["engine"] == "rapidocr"
-    assert "name" not in values
     assert base == tmp_path
 
 
@@ -113,9 +113,10 @@ def test_cli_config_applies_and_flags_override(monkeypatch, tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(
         "assets_dir: assets\n"
-        "output: work\n"
+        "work: work\n"
+        "output: final\n"
         "engine: rapidocr\n"
-        "force: false\n"
+        "force: true\n"
         "bold_thickness_ratio: 0.082\n"
         "middlewares: [hooks/a.py]\n",
         encoding="utf-8",
@@ -133,14 +134,15 @@ def test_cli_config_applies_and_flags_override(monkeypatch, tmp_path):
     cli.main()
     assert captured["images"] == str(tmp_path / "assets")
     assert captured["work_dir"] == str(tmp_path / "work")
+    assert captured["out_dir"] == str(tmp_path / "final")
     assert captured["engine"] == "rapidocr"
-    assert captured["force"] is False
+    assert captured["force"] is True
     assert captured["bold_thickness_ratio"] == 0.082
     assert captured["middlewares"] == [str(tmp_path / "hooks/a.py")]
 
     monkeypatch.setattr(
         sys, "argv",
-        ["p2md", "pipeline", "--config", str(path), "--engine", "swift", "--force"])
+        ["p2md", "pipeline", "--config", str(path), "--engine", "swift", "--no-force"])
     cli.main()
     assert captured["engine"] == "swift"
-    assert captured["force"] is True
+    assert captured["force"] is False

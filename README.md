@@ -5,8 +5,9 @@
 `p2md` 是通用基础库与 CLI：把一组图片转换成章节 Markdown，识别正文段落、标题、插图与表格，裁出图片并生成 `images/...` 引用。**最终产物是 Markdown 和裁图**。
 
 ```
-输入：./assets/p3.png ... p692.png
-输出：<work_dir>/content/article_0.md ... + <work_dir>/content/images/*.png
+输入：   ./assets/p3.png ... p692.png
+中间产物：<work>/ocr/ blocks/ figs/ content/
+最终交付：<output>/article_0.md ... + <output>/images/*.png
 ```
 
 所有选项都由 CLI flag 或 Python API 显式传入。
@@ -30,12 +31,34 @@ pip install p2md
 
 ## 快速开始（CLI）
 
+无子命令直接转换：
+
+```bash
+# 打印 Markdown 到终端
+p2md ~/Desktop/book_imgs/*.jpg
+
+# 在图片旁写出同名 .md（覆盖已有同名文件）
+p2md -o ~/Desktop/book_imgs/*.jpg
+# 01.jpg -> 01.md，02.jpg -> 02.md
+```
+
+传 `--work` / `--out` 时，中间产物和 Markdown 分别写入指定目录：
+
+```bash
+p2md --work ./work --out ./output ~/Desktop/book_imgs/*.jpg
+```
+
+分步与全流程子命令：
+
 ```bash
 # 全流程：图片 → OCR → 版面检测 → Markdown
 p2md pipeline --images ./assets --work ./work --out ./out
 
 # 指定 OCR 引擎并忽略缓存
 p2md pipeline --images ./assets --work ./work --engine rapidocr --force
+
+# 单张图片（页号固定为 1）
+p2md pipeline --image ./one.png --work ./work --out ./output
 ```
 
 分步执行：
@@ -51,27 +74,46 @@ p2md build    --work ./work --chapters ./chapters.json   # 可选人工章节
 CLI 支持显式传入配置文件：
 
 ```bash
-p2md pipeline --config ./projects/么瑞/config.yaml
+p2md pipeline --config ./config.yaml
 ```
 
-配置文件为 YAML 或 JSON，命令行参数优先于配置文件。配置文件中的相对路径按**配置文件所在目录**解析。
+配置文件为 YAML 或 JSON，命令行参数优先于配置文件。配置文件中的相对路径按**配置文件所在目录**解析；未知键会直接报错。
 
 ```yaml
 engine: auto
 assets_dir: assets
-output: output
+work: work
+output: out
 start_page: null
 end_page: null
 force: false
 min_heading_ratio: 1.28
-bold_thickness_ratio: 0.082
+bold_thickness_ratio: 0.078
 middlewares:
 - hooks/clean_ocr.py
 - hooks/fix_ocr.py
-- hooks/drop_reward_button.py
 ```
 
-`assets_dir` 等价于 `images_dir`，`output` 等价于中间产物目录 `work_dir`，`start_page` / `end_page` 等价于 `--start` / `--end`。
+- `work`：唯一中间产物临时目录。
+- `output`：最终交付目录，保存 Markdown 与 `images/`。
+- `start_page` / `end_page`：等价于 `--start` / `--end`。
+
+可用键：
+
+| 键 | 说明 |
+|---|---|
+| `engine` | OCR 引擎，`auto` / `swift` / `rapidocr` |
+| `assets_dir` | 输入图片目录 |
+| `work` | 中间产物目录 |
+| `output` | 最终交付目录 |
+| `start_page` / `end_page` | OCR 页码范围 |
+| `force` | 强制重跑 OCR |
+| `split_long_image_max_ratio` / `split_slice_max_h` / `split_slice_min_h` / `split_slice_ratio` | 长图切分参数 |
+| `min_heading_ratio` / `bold_thickness_ratio` / `heading_plain_ratio` / `heading_page_base` / `bold_use_page_h` | 版面检测参数 |
+| `ocr_fix_global` | 内置通用 OCR 纠错开关 |
+| `middlewares` | OCR 后执行的脚本列表 |
+| `chapters` | 人工章节结构 JSON 文件 |
+| `base_dir` | 中间件脚本相对路径基准 |
 
 ## Python API
 
@@ -81,32 +123,38 @@ import p2md
 result = p2md.convert(
     "./assets",
     work_dir="./work",
-    out_dir="./out",
+    out_dir="./output",
     engine=None,          # auto / swift / rapidocr；None=按平台默认
     force=False,
 )
 print(result.pages, len(result.markdowns))
+
+# 单张图片
+result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 ```
 
 - `convert_images(...)` 与 `convert(...)` 参数相同；返回 `ConvertResult(markdowns, images, pages, work_root, warnings)`。
+- `convert_image(...)` 是单图入口；直接传图片文件路径，页号固定为 1。
 - 失败抛 `ConvertError`（底层 `SystemExit` 已统一转换）。
 - 不传 `work_dir` 时使用 `<cwd>/.derived/ocr/<images 目录名>`。
 
 ## 产物结构
 
 ```
-<work_dir>/
+<work>/
 ├── _ocr_tmp/             # 预处理后的页图
 ├── ocr/                  # OCR 产物（pages_json + pages + broken.txt）
 ├── blocks/               # 每页 blocks JSON
 ├── figs/                 # 裁出的插图/表格
 ├── md/                   # 章节 Markdown（便于复核）
-└── content/
-    ├── article_0.md ...
-    └── images/           # 裁图，article 内引用 images/xxx.png
+└── content/              # build 原始产物，复制到 output
+
+<output>/
+├── article_0.md ...
+└── images/               # 裁图，article 内引用 images/xxx.png
 ```
 
-传 `--out` / `out_dir` 时，`content/` 下的 Markdown 与 `images/` 会复制到该目录。
+传 `--out` / `out_dir` 时，`<work>/content/` 下的 Markdown 与 `images/` 会复制到 `<output>`。
 
 ## CLI 参数
 
@@ -116,10 +164,10 @@ print(result.pages, len(result.markdowns))
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--images` | 必填 | 输入图片目录 |
+| `--images` / `--image` | 必填 | 输入图片目录或单张图片；单图页号固定为 1 |
 | `--work` | `<cwd>/.derived/ocr/<images 名>` | 中间产物目录 |
 | `--start` / `--end` | 自动探测 | OCR 页码范围 |
-| `-f, --force` | `false` | 忽略 OCR 缓存，重跑全部页 |
+| `-f, --force` / `--no-force` | `false` | 忽略 OCR 缓存，重跑全部页 / 关闭强制重跑 |
 | `--engine` | `auto` | `auto` / `swift` / `rapidocr` |
 | `--split-long-image-max-ratio` | `3.0` | 高/宽比超过该值视为超长图并切片；`0` 关闭 |
 | `--split-slice-max-h` | `2600` | 长图切片最大高度（px） |
@@ -130,7 +178,7 @@ print(result.pages, len(result.markdowns))
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--images` | `<work>/_ocr_tmp` | 输入图片目录 |
+| `--images` | 无 | 仅用于推导 `--work`；检测固定读取 `<work>/_ocr_tmp` |
 | `--work` | `<cwd>/.derived/ocr` | 中间产物目录 |
 | `pages` | 全部页 | 仅处理指定页号（调试用） |
 | `--min-heading-ratio` | `1.28` | 彩色标题/正文字号最小比例；调高更严格 |
@@ -145,6 +193,7 @@ print(result.pages, len(result.markdowns))
 |---|---|---|
 | `--work` | `<cwd>/.derived/ocr` | 中间产物目录 |
 | `--chapters` | 自动分章 | 人工章节结构 JSON 路径 |
+| `--out` | `None` | 最终交付目录；不传只写 `<work>/content` |
 
 ### `p2md pipeline`
 
@@ -152,9 +201,11 @@ print(result.pages, len(result.markdowns))
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--out` | `None` | 最终 Markdown 复制目标；不传则只留在 `<work>/content` |
-| `--base-dir` | 当前目录 | 中间件脚本相对路径的解析基准 |
+| `--config` | 无 | 显式 YAML/JSON 配置文件；命令行参数优先 |
+| `--out` | `None` | 最终交付目录；不传则只留在 `<work>/content` |
+| `--base-dir` | 当前目录或配置文件目录 | 中间件脚本相对路径的解析基准 |
 | `--middleware` | 无 | 中间件脚本路径，可重复，按序执行；脚本须定义 `process(ocr_dir, base_dir)` |
+| `--chapters` | 自动分章 | 人工章节结构 JSON 路径 |
 | `--ocr-fix-global` / `--no-ocr-fix-global` | `true` | 启用内置通用 OCR 纠错 |
 | `--start` / `--end` | 自动探测 | OCR 页码范围 |
 
@@ -179,7 +230,7 @@ p2md.convert(
 | `out_dir` | `None` | 最终 Markdown 复制目标 |
 | `base_dir` | 当前目录 | 中间件脚本相对路径基准 |
 | `engine` | `None` | `auto` / `swift` / `rapidocr`；`None` 按平台默认 |
-| `force` | `false` | 忽略 OCR 缓存重跑 |
+| `force` | `false` | 忽略 OCR 缓存重跑；传 `True` 强制重跑 |
 | `start` / `end` | `None` | OCR 页码范围 |
 | `split_long_image_max_ratio` | `3.0` | 超长图切分阈值；`0` 关闭 |
 | `split_slice_max_h` / `split_slice_min_h` / `split_slice_ratio` | `2600` / `1400` / `3.0` | 切片尺寸约束 |
@@ -190,8 +241,14 @@ p2md.convert(
 | `bold_use_page_h` | `true` | 用组级字号归一化加粗 |
 | `ocr_fix_global` | `true` | 内置通用 OCR 纠错 |
 | `middlewares` | `None` | OCR 后执行的脚本列表 |
-| `chapters` | `None` | 人工章节结构 |
+| `chapters` | `None` | 人工章节结构列表；CLI 的 `--chapters` 会先加载 JSON 文件 |
 | `log` | `None` | 日志回调 `Callable[[str], None]`，默认静默 |
+
+已有中间产物时，可只跑 build 并复制到最终目录：
+
+```python
+result = p2md.build_stage("./work", out_dir="./output", chapters=None)
+```
 
 ## 输出格式
 

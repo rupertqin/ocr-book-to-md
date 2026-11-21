@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 
 from PIL import Image
 import numpy as np
@@ -595,13 +596,6 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
     # 标题是短标题，正文段落（一整句）即使行高略大也不应被当标题。
     # 用最大字符数过滤：超过 max_heading_chars 视为正文（误判的长句不再当标题）。
     max_heading_chars = 40
-    # 页面最顶部文本行的 y_top：长图文章标题往往是该页/该片第一行，字号只比正文
-    # 大 ~1.1×（低于 1.18 通用阈值）。page_heading_base 时对"页面顶部首个文本"用
-    # 更低的 plain_heading_ratio，避免把正文里字号略大的行（如列表项）误判成标题。
-    _text_rows = [(l["y_top"], l["y_bottom"]) for l in px
-                  if l["text"].strip()
-                  and not FIG_RE.search(l["text"]) and not TBL_RE.search(l["text"])]
-    top_text_y = min((t for t, _ in _text_rows), default=0)
     for i, line in enumerate(px):
         if FIG_RE.search(line["text"]) or TBL_RE.search(line["text"]):
             continue
@@ -617,11 +611,8 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
             continue
         col = _line_text_color(img_rgb, line, W, H)
         sat = _col_sat(col) if col else 0.0
-        # 低行高阈值仅放宽给"页面顶部首个文本行"（长图文章标题常只比正文大 ~1.1×，
-        # 低于通用 1.18）；仅 page_heading_base=True（么瑞等多长图场景）时启用，
-        # 其余文本一律 >=1.18，防正文行/列表项误判为标题。
-        _is_top = page_heading_base and abs(line["y_top"] - top_text_y) < 0.5 * body_h
-        _eff_ratio = plain_heading_ratio if _is_top else 1.18
+        # 非彩色标题统一使用调用方传入的 heading_plain_ratio；需要更严格时调高该值。
+        _eff_ratio = plain_heading_ratio
         # 非彩色标题行高判定：elif 链保持"上一分支条件整体不满足才落到下一分支"，
         # 低行高的粗体标题仍能落到最后的粗体分支。
         if col and sat > 0.25 and h_ratio >= min_heading_ratio \
@@ -1191,6 +1182,24 @@ def _swap_in(tmp, dst):
         pass
 
 
+def _merge_in(tmp, dst):
+    """把 tmp 内容合并覆盖进 dst，保留 dst 中本次未生成的其他页产物。"""
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(tmp):
+        src = os.path.join(tmp, name)
+        target = os.path.join(dst, name)
+        if os.path.isdir(src):
+            _merge_in(src, target)
+            continue
+        if os.path.isfile(target):
+            os.remove(target)
+        shutil.move(src, target)
+    try:
+        os.rmdir(tmp)
+    except OSError:
+        pass
+
+
 def _group_text_into_tables(blocks, min_rows=3):
     """把"多行多列、x 对齐成网格"的 text 块聚合成一个 table 块（通用表格识别）。
 
@@ -1305,15 +1314,16 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1
     with open(jpath, encoding="utf-8") as f:
         data = json.load(f)
     lines = data.get("lines", [])
-    img = Image.open(ipath)
-    W, H = img.size
-    img_gray = np.array(img.convert("L")).astype(np.float32)
-    img_rgb = np.array(img.convert("RGB")).astype(np.float32)
+    with Image.open(ipath) as img:
+        W, H = img.size
+        img_gray = np.array(img.convert("L")).astype(np.float32)
+        img_rgb = np.array(img.convert("RGB")).astype(np.float32)
     px = _lines_to_px(lines, W, H)
     body_h = _estimate_body_h(px)
-    # 标题/加粗的字号基准：优先用该页所属长图组的像素正文行高中位（同组切片字号一致，
-    # 比单页 body_h 稳，p17/p28 这类"正文样本少"页不拖偏）；无组时回退本页 body_h。
+    # 标题字号基准由 heading_page_base 决定；加粗归一化独立由 bold_use_page_h 决定，
+    # 两者都优先用长图组像素正文中位，无组时回退本页 body_h。
     font_base_h = group_body_h if (group_body_h and page_heading_base) else body_h
+    bold_base_h = (group_body_h or body_h) if bold_use_page_h else None
     paras = _para_clusters(px, body_h, W, img_gray=img_gray)
 
     passA = _pass_a_regions(px, W, H, img_gray, body_h, paras, n=n)
@@ -1324,7 +1334,7 @@ def _process_page(n, json_dir, img_dir, blocks_tmp, fig_tmp, min_heading_ratio=1
                                        bold_thickness_ratio=bold_thickness_ratio,
                                        plain_heading_ratio=plain_heading_ratio,
                                        page_heading_base=page_heading_base,
-                                       bold_base_h=(font_base_h if bold_use_page_h else None))
+                                       bold_base_h=bold_base_h)
     heading_rows = [(px[i]["y_top"], px[i]["y_bottom"]) for i in heading_by_line]
     table_bands = _table_row_bands(px, W, body_h=body_h)
     passB = _pass_b_regions(px, W, H, img_gray, body_h, paras, passA,
@@ -1502,7 +1512,8 @@ def _group_body_h_map(json_dir, img_dir, pages):
                 ip = os.path.join(img_dir, f"p{n}.png")
             if not os.path.exists(ip):
                 continue
-            H = Image.open(ip).size[1]
+            with Image.open(ip) as _im:
+                H = _im.size[1]
         except Exception:
             continue
         hs = [ln["h"] * H for ln in dd.get("lines", [])
@@ -1541,6 +1552,7 @@ def detect(work_dir, img_dir, pages=None,
     json_dir = str(paths.ocr_pages_json_dir(work))
     blocks_dir = str(paths.blocks_dir(work))
     fig_dir = str(paths.figs_dir(work))
+    partial = pages is not None
 
     plain_heading_ratio = heading_plain_ratio
     page_heading_base = heading_page_base
@@ -1549,8 +1561,8 @@ def detect(work_dir, img_dir, pages=None,
         raise SystemExit(f"错误：未找到 OCR 坐标目录 {json_dir}\n"
                          f"  请先运行 OCR（p2md ocr / convert）")
     if not os.path.isdir(img_dir):
-        raise SystemExit(f"错误：未找到截图目录 {img_dir}\n"
-                         f"  请用 --assets 指定正确的素材目录（或先跑 OCR）")
+        raise SystemExit(f"错误：未找到页图目录 {img_dir}\n"
+                         f"  请先运行 OCR（p2md ocr / convert）")
 
     # 计算全书统一正文基准行高（跨页面有效）：所有页 OCR 行高的中位数。
     # 标题字号与正文字号的比较用全局基准，避免单页 body_h 估算波动。
@@ -1583,8 +1595,9 @@ def detect(work_dir, img_dir, pages=None,
             shutil.rmtree(p, ignore_errors=True)
             print(f"  清理历史临时目录: {p}")
 
-    blocks_tmp = os.path.join(out_str, f".blocks.tmp.{os.getpid()}")
-    fig_tmp = os.path.join(out_str, f".figs.tmp.{os.getpid()}")
+    run_id = uuid.uuid4().hex
+    blocks_tmp = os.path.join(out_str, f".blocks.tmp.{run_id}")
+    fig_tmp = os.path.join(out_str, f".figs.tmp.{run_id}")
     os.makedirs(blocks_tmp, exist_ok=True)
     os.makedirs(fig_tmp, exist_ok=True)
 
@@ -1611,7 +1624,11 @@ def detect(work_dir, img_dir, pages=None,
                           group_body_h=group_body_map.get(n))
         if r:
             total += r
-    _swap_in(blocks_tmp, blocks_dir)
-    _swap_in(fig_tmp, fig_dir)
+    if partial:
+        _merge_in(blocks_tmp, blocks_dir)
+        _merge_in(fig_tmp, fig_dir)
+    else:
+        _swap_in(blocks_tmp, blocks_dir)
+        _swap_in(fig_tmp, fig_dir)
     print(f"processed {len(pages)} pages, {total} regions")
     return blocks_dir, fig_dir, total

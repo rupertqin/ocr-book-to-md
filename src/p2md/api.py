@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""库接口：把一组图片从页图转成章节 Markdown，一次调用走完 ocr → detect → build。
+"""库接口：把图片从页图转成章节 Markdown，一次调用走完 ocr → detect → build。
 
 所有参数都由调用方显式传入。
 
@@ -8,12 +8,11 @@
 - 最终章节 Markdown 从 build 的 content 目录复制到 ``out_dir``（给了才复制）；
 - 图片一并复制到 ``<out_dir>/images/``，md 里的 ``images/...`` 引用可直接解析。
 
-错误处理：底层阶段用 ``SystemExit`` 表示前置条件不满足，这里统一转成 ``ConvertError``。
+错误处理：所有阶段、目录准备与最终复制的异常都收敛成 ``ConvertError``。
 """
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -22,12 +21,12 @@ from . import defaults, paths
 
 
 class ConvertError(RuntimeError):
-    """转换失败（输入缺失、工具不可用、阶段报错）。调用方据此判 failed/invalid。"""
+    """转换失败（输入缺失、工具不可用、阶段报错、复制失败）。"""
 
 
 @dataclass
 class ConvertResult:
-    """一次图片集转换的结果。``markdowns`` 是最终可用的章节文件（已含图片相对引用）。"""
+    """一次转换的结果。``markdowns`` 是最终可用的章节文件。"""
 
     markdowns: List[Path] = field(default_factory=list)
     images: List[Path] = field(default_factory=list)
@@ -46,6 +45,64 @@ def _call(stage: str, fn, *args, **kwargs):
         raise ConvertError(f"{stage}: {exc}") from exc
     except Exception as exc:                  # noqa: BLE001 - 统一收敛给调用方判定
         raise ConvertError(f"{stage}: {type(exc).__name__}: {exc}") from exc
+
+
+def _noop(_msg: str) -> None:
+    pass
+
+
+def _resolve_dir(value, label: str) -> Path:
+    try:
+        return Path(value).expanduser().resolve()
+    except Exception as exc:
+        raise ConvertError(f"{label}路径无效: {value!r}: {exc}") from exc
+
+
+def _collect_result(work: Path, article_dir: Path, out_dir=None,
+                    log: Optional[Callable[[str], None]] = None) -> ConvertResult:
+    say = log or _noop
+    article = Path(article_dir)
+    bodies = sorted(article.glob("*.md"))
+    images = sorted((article / "images").glob("*")) \
+        if (article / "images").is_dir() else []
+
+    result = ConvertResult(markdowns=bodies, images=images, work_root=work)
+
+    if out_dir:
+        dest = _resolve_dir(out_dir, "output")
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            raise ConvertError(f"output: 创建目录失败 {dest}: {exc}") from exc
+        if dest != article:
+            try:
+                from .build_md import _mirror_dir
+                _mirror_dir(article, dest)
+            except Exception as exc:
+                raise ConvertError(f"output: 同步产物失败 {dest}: {exc}") from exc
+            result.markdowns = [dest / p.name for p in bodies]
+            result.images = [dest / "images" / p.name for p in images]
+        say(f"[done] {len(bodies)} 章 → {dest}")
+
+    if not result.markdowns:
+        result.warnings.append("没有产出任何 Markdown（检查图片与章节结构）")
+    return result
+
+
+def build_stage(work_dir, out_dir=None, chapters=None,
+                log: Optional[Callable[[str], None]] = None) -> ConvertResult:
+    """从已有 work 目录组装章节 Markdown，可选复制到最终 output 目录。"""
+    from . import build_md
+
+    say = log or _noop
+    work = _resolve_dir(work_dir, "work")
+    article = paths.article_dir(work)
+    say("[build] 组装章节")
+    _call("build", build_md.build, str(work), chapters)
+    pages_json = paths.ocr_pages_json_dir(work)
+    result = _collect_result(work, article, out_dir, say)
+    result.pages = len(list(pages_json.glob("*.json"))) if pages_json.is_dir() else 0
+    return result
 
 
 def convert_images(
@@ -75,7 +132,7 @@ def convert_images(
     """把一组图片转成章节 Markdown。
 
     Args:
-        images_dir: 源图片目录（必填）。
+        images_dir: 源图片目录或单张图片文件（必填）。
         work_dir: 中间产物目录；默认 ``<cwd>/.derived/ocr/<images_dir 名>``。
         out_dir: 最终 Markdown 复制目标；不给就只留在 ``work_dir/content``。
         base_dir: 中间件脚本相对路径的解析基准；默认当前工作目录。
@@ -93,21 +150,25 @@ def convert_images(
     Returns:
         ConvertResult。
     """
-    from . import build_md, detect as detect_mod, middleware, ocr
+    from . import detect as detect_mod, middleware, ocr
 
-    say = log or (lambda _msg: None)
-    src = Path(images_dir).expanduser().resolve()
-    if not src.is_dir():
-        raise ConvertError(f"图片目录不存在: {src}")
+    say = log or _noop
+    source = _resolve_dir(images_dir, "images")
+    if not source.exists():
+        raise ConvertError(f"图片目录或文件不存在: {source}")
+    # 单图输入的默认 work 名用原文件名，避免复制后统一叫 p1。
+    work_name = source.name if source.is_dir() else source.stem
+    work = _resolve_dir(work_dir, "work") if work_dir else \
+        (Path.cwd() / ".derived" / "ocr" / work_name).resolve()
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise ConvertError(f"work: 创建目录失败 {work}: {exc}") from exc
+    base = _resolve_dir(base_dir, "base") if base_dir else Path.cwd()
 
-    work = paths.work_path(work_dir) if work_dir else \
-        (Path.cwd() / ".derived" / "ocr" / src.name).resolve()
-    work.mkdir(parents=True, exist_ok=True)
-    base = Path(base_dir).expanduser().resolve() if base_dir else Path.cwd()
-
-    say(f"[ocr] 源 {src} → 中间产物 {work}")
+    say(f"[ocr] 源 {source} → 中间产物 {work}")
     img_dir, _start, _end = _call(
-        "ocr", ocr.run, str(src), str(work), start, end,
+        "ocr", ocr.run, str(source), str(work), start, end,
         force=force, engine=engine,
         split_long_image_max_ratio=split_long_image_max_ratio,
         split_slice_max_h=split_slice_max_h,
@@ -116,7 +177,8 @@ def convert_images(
 
     say("[middleware] 逐页修正")
     _call("middleware", middleware.run_all, str(work),
-          middlewares=middlewares, ocr_fix_global=ocr_fix_global, base_dir=str(base))
+          middlewares=middlewares, ocr_fix_global=ocr_fix_global,
+          base_dir=str(base), log=say)
 
     say("[detect] 版面检测")
     _call("detect", detect_mod.detect, str(work), img_dir, None,
@@ -126,34 +188,10 @@ def convert_images(
           heading_page_base=heading_page_base,
           bold_use_page_h=bold_use_page_h)
 
-    say("[build] 组装章节")
-    md_dir, article_dir, written = _call("build", build_md.build, str(work), chapters)
-
-    bodies = sorted(Path(article_dir).glob("*.md"))
-    images = sorted((Path(article_dir) / "images").glob("*")) \
-        if (Path(article_dir) / "images").is_dir() else []
+    result = build_stage(str(work), out_dir=out_dir, chapters=chapters, log=say)
 
     pages_json = paths.ocr_pages_json_dir(work)
-    pages = len(list(pages_json.glob("*.json"))) if pages_json.is_dir() else 0
-
-    result = ConvertResult(markdowns=bodies, images=images, pages=pages, work_root=work)
-
-    if out_dir:
-        dest = Path(out_dir).expanduser().resolve()
-        dest.mkdir(parents=True, exist_ok=True)
-        for path in bodies:
-            shutil.copyfile(path, dest / path.name)
-        if images:
-            img_dest = dest / "images"
-            img_dest.mkdir(parents=True, exist_ok=True)
-            for path in images:
-                shutil.copyfile(path, img_dest / path.name)
-        result.markdowns = [dest / p.name for p in bodies]
-        result.images = [dest / "images" / p.name for p in images]
-        say(f"[done] {len(bodies)} 章 → {dest}")
-
-    if not result.markdowns:
-        result.warnings.append("没有产出任何 Markdown（检查图片与章节结构）")
+    result.pages = len(list(pages_json.glob("*.json"))) if pages_json.is_dir() else 0
     return result
 
 
@@ -162,4 +200,12 @@ def convert(images_dir, **kwargs) -> ConvertResult:
     return convert_images(images_dir, **kwargs)
 
 
-__all__ = ["ConvertError", "ConvertResult", "convert", "convert_images"]
+def convert_image(image_path, **kwargs) -> ConvertResult:
+    """转换单张图片；``image_path`` 可直接传图片文件路径。"""
+    return convert_images(image_path, **kwargs)
+
+
+__all__ = [
+    "ConvertError", "ConvertResult", "build_stage",
+    "convert", "convert_image", "convert_images",
+]

@@ -9,10 +9,12 @@
     content/images/             裁图（article 内的图片引用统一改为 images/）
 """
 
+import html
 import json
 import os
 import re
 import shutil
+import uuid
 
 from . import paths
 
@@ -45,20 +47,22 @@ def _is_list_item(t):
 
 
 def cn2int(s):
+    """把中文数字（一~九十九）转成整数。"""
     if not s:
         return 0
     if len(s) == 1:
         return CN.get(s, 0)
-    if s.startswith("十"):
-        return 10 + CN.get(s[1:], 0)
-    if s.endswith("十"):
-        return CN.get(s[0], 0) * 10
+    if "十" in s:
+        tens, ones = s.split("十", 1)
+        return (CN.get(tens, 1) if tens else 1) * 10 + CN.get(ones, 0)
     return 0
 
 
 def slugify(t):
+    """生成安全 slug：去掉标点、空白与路径非法字符，避免空名。"""
+    t = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "", t)
     t = re.sub(r"[，。、；：！？（）“”\"'\s·—…\-]+", "", t)
-    return t
+    return t.strip(". ") or "section"
 
 
 # 长图文章标题定位：首片顶部区域内的中日韩文本行；不含中文的行（时间/电量等
@@ -357,8 +361,6 @@ def auto_chapters(blocks_dir):
         end = anchors[i + 1][0] - 1 if i + 1 < len(anchors) else maxp
         segs.append((kind, n, end, title))
 
-    cn_num = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
-              "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
     chapters = []
     max_no = 0
     for kind, a, b, title in segs:
@@ -406,6 +408,7 @@ def _fmt_line(text, bold, centered):
     """按 detect 判定的 加粗/居中 格式化单行文本。
     用纯 HTML（<strong> / <div style="text-align:center">）避免 markdown 解析器
     在 HTML 块内不处理 `**` 的问题。"""
+    text = html.escape(text, quote=False)
     if bold:
         text = f"<strong>{text}</strong>"
     if centered:
@@ -528,7 +531,7 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
     段落状态 cur_para 跨页延续——detect 标 para_start=False 的首行（切片边界
     续行）自动并入上一段，消除长图切片造成的"段中换页=两段"伪断裂。
 
-    skip_pages: 这些页整页不参与渲染（沿用旧的 front 跳过第10/11/12页逻辑）。
+    skip_pages: 这些页整页不参与渲染；默认不跳过任何页。
     drop_img_span: (page, y0, y1, title_h)，把该页与标题行重叠的"标题条截图"丢弃
         ——标题文字已写在文件头 `# 标题`，同一张图再插一次即图文重复（留字去图）。
     """
@@ -744,7 +747,7 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
         has_style = any(bld or col for _, bld, col in runs)
         parts = []
         for t, bld, col in runs:
-            s = t
+            s = html.escape(t, quote=False)
             if col:
                 # col=(rgb, name)。语义标准色优先输出名称（如 red/pink）；无则 hex
                 _val = col[1] if col[1] else "#%02x%02x%02x" % tuple(col[0][:3])
@@ -763,6 +766,7 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
         ncol = max(len(r) for r in rows)
         def _cell_text(c):
             t = (c.get("text") or "").strip() if isinstance(c, dict) else str(c).strip()
+            t = html.escape(t, quote=False)
             col = c.get("color_rgb") if isinstance(c, dict) else None
             if col:
                 nm = c.get("color_name") if isinstance(c, dict) else None
@@ -903,9 +907,7 @@ def _write_chapter(blocks_dir, md_tmp, spec):
     # 空标题（如长图切分合并的单篇）不写 `#`，避免无意义的空标题
     head = ([f"# {title}\n\n"] if title else [])
     if kind == "front":
-        body = _render_pages_cross_page(
-            blocks_dir, list(range(start, end + 1)),
-            skip_pages=(10, 11, 12))
+        body = _render_pages_cross_page(blocks_dir, list(range(start, end + 1)))
     elif kind == "part_intro":
         body = _render_pages_cross_page(blocks_dir, [start])
     else:
@@ -1009,7 +1011,8 @@ def build(work_dir, chapters=None):
         raise SystemExit(f"错误：未找到 figs 目录 {figs_dir}\n"
                          f"  请先运行布局分析（p2md detect / convert）")
 
-    md_tmp = os.path.join(str(work), f".md.tmp.{os.getpid()}")
+    run_id = uuid.uuid4().hex
+    md_tmp = os.path.join(str(work), f".md.tmp.{run_id}")
     os.makedirs(md_tmp, exist_ok=True)
 
     if chapters is None:
@@ -1032,7 +1035,7 @@ def build(work_dir, chapters=None):
 
     # ---- 产出 article 目录（每章一个 md + images/） ----
     # 每章 → article_N.md；图片引用 ../figs/ → images/；裁图复制到 content/images/
-    article_tmp = os.path.join(str(work), f".article.tmp.{os.getpid()}")
+    article_tmp = os.path.join(str(work), f".article.tmp.{run_id}")
     images_tmp = os.path.join(article_tmp, "images")
     os.makedirs(article_tmp, exist_ok=True)
     os.makedirs(images_tmp, exist_ok=True)

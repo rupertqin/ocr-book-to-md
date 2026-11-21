@@ -19,8 +19,23 @@ LOG：每次修正打印 [ocr_fix] p{n} 旧文本 → 新文本，便于核对�
 
 import json
 import os
+import tempfile
 
 from . import defaults, paths
+
+
+def _atomic_write_json(path, data) -> None:
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
 
 # ---- 内置通用规则（形近字高频错，数据驱动，可按新发现追加）----
 #
@@ -110,10 +125,17 @@ def _filter_watermark_lines(data, log, h_ratio=4.0, max_len=12,
             y_top = 1.0 - float(ln.get("y", 0.0)) - float(h)
         except (TypeError, ValueError):
             y_top = 1.0
+        looks_status = bool(
+            _re.match(r"^\d{1,2}:\d{2}(:\d{2})?$", t)
+            or _re.match(r"^[×xX]?\s*\d+(?:\s*\d+)*\s*%?$", t)
+            or (len(t) <= 3 and not _re.search(r"[A-Za-z]", t))
+        )
         top_status = (header_pages is not None
                       and data.get("page") in header_pages
                       and len(t) <= 10 and y_top <= 0.04
-                      and not _re.search(r"[\u4e00-\u9fff]", t))
+                      and not _re.search(r"[\u4e00-\u9fff]", t)
+                      and looks_status
+                      and not _re.search(r"[A-Za-z]{2,}", t))
         if t and (is_word_wm or rare_wm or weak_wm or top_status):
             n_removed += 1
             tag = "hdr" if top_status and not (is_word_wm or rare_wm or weak_wm) else "wm"
@@ -157,7 +179,7 @@ def fix_pages(ocr_dir, word_fixes, cross_line_fixes, log=print):
     """对 pages_json 全部页应用纠错规则。返回修正总数。
 
     Args:
-        ocr_dir: output/ocr/pages_json/ 目录
+        ocr_dir: <work>/ocr/pages_json/ 目录
         word_fixes: [(错误子串, 正确子串), ...]
         cross_line_fixes: [(锚定词, 行尾误字, 下行首字, 应改字), ...]
         log: 打印函数（默认 print），每次修正会调用
@@ -173,14 +195,13 @@ def fix_pages(ocr_dir, word_fixes, cross_line_fixes, log=print):
         n = _fix_lines_in_page(data, word_fixes, cross_line_fixes,
                                page_label, log)
         if n:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
+            _atomic_write_json(path, data)
             total += n
     return total
 
 
 def run_global_fix(work_dir, enabled=defaults.OCR_FIX_GLOBAL, log=print) -> int:
-    """运行内置通用 OCR 纠错。
+    """运行内置通用 OCR 纠错（每页一次读、一次写）。
 
     Returns:
         修正的字符/行数（0 = 未启用或未修正）。
@@ -192,9 +213,6 @@ def run_global_fix(work_dir, enabled=defaults.OCR_FIX_GLOBAL, log=print) -> int:
     if not os.path.isdir(ocr_dir):
         return 0
     log("  (OCR 内置通用纠错: 形近字修正 + 水印行滤除 + 长图首片状态栏滤除)")
-    total = fix_pages(ocr_dir, GLOBAL_WORD_FIXES, GLOBAL_CROSS_LINE_FIXES, log=log)
-    # 长图各组首片页号：状态栏残渣（时间/电量/信号）只会在长截图首片出现，故限定
-    # 首片做该项滤除，避免误伤普通页顶部可能出现的图表参数标注。
     header_pages = None
     try:
         from .ocr import read_long_image_pages
@@ -203,19 +221,26 @@ def run_global_fix(work_dir, enabled=defaults.OCR_FIX_GLOBAL, log=print) -> int:
             header_pages = {min(ps) for ps in lip.values() if ps}
     except Exception:
         header_pages = None
-    # 斜排水印行滤除（通用：Vision 对斜排半透明水印给超大 bbox + 短文本特征）
+
+    total = 0
     wm = 0
     for fname in sorted(os.listdir(ocr_dir)):
         if not fname.endswith(".json"):
             continue
         path = os.path.join(ocr_dir, fname)
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        n = _filter_watermark_lines(data, log, header_pages=header_pages)
-        if n:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-            wm += n
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        page_label = f"p{data.get('page', fname)}"
+        fixed = _fix_lines_in_page(data, GLOBAL_WORD_FIXES,
+                                   GLOBAL_CROSS_LINE_FIXES, page_label, log)
+        removed = _filter_watermark_lines(data, log, header_pages=header_pages)
+        if fixed or removed:
+            _atomic_write_json(path, data)
+            total += fixed
+            wm += removed
     if wm:
         log(f"    滤除噪音行 {wm} 处")
     log(f"    共修正 {total} 处")

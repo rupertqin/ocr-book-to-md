@@ -43,8 +43,15 @@ def test_rewrite_fig_refs():
     assert "../figs/" not in out
 
 
+def test_fmt_line_escapes_html():
+    assert build_md._fmt_line("A<B & C", True, True) == \
+        '<div style="text-align:center"><strong>A&lt;B &amp; C</strong></div>'
+
+
 def test_cn2int():
     assert build_md.cn2int("一") == 1
     assert build_md.cn2int("十") == 10
     assert build_md.cn2int("十三") == 13
     assert build_md.cn2int("二十") == 20
+    assert build_md.cn2int("二十一") == 21
+    assert build_md.cn2int("九十九") == 99

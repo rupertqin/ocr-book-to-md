@@ -32,6 +32,11 @@ def ocr_tmp_dir(work_dir: str | Path) -> Path:
     return work_path(work_dir) / "_ocr_tmp"
 
 
+def single_input_dir(work_dir: str | Path) -> Path:
+    """单张图片输入的工作副本目录。"""
+    return work_path(work_dir) / "_single_input"
+
+
 def blocks_dir(work_dir: str | Path) -> Path:
     return work_path(work_dir) / "blocks"
 

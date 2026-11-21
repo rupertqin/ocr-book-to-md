@@ -3,7 +3,7 @@
 
 - macOS（默认）：编译并运行 ocr_batch.swift（Apple Vision）；分段调用、SIGBUS 二分兜底。
 - 其他平台（默认）：RapidOCR（onnxruntime 小模型，自带中文），输出与 Vision 同 schema。
-- 两者都输出 ``output/ocr/pages_json/<n>.json``：``{"page": n, "lines": [{text,x,y,w,h}]}``，
+- 两者都输出 ``<work>/ocr/pages_json/<n>.json``：``{"page": n, "lines": [{text,x,y,w,h}]}``，
   x/y/w/h 归一化、原点左下（与 Vision 的 boundingBox 一致）。
 
 通用能力：源图预处理为 JPEG（规避 ImageIO 解 PNG 的 SIGBUS）、超长图按段落切分、
@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from . import defaults, paths
@@ -30,9 +31,89 @@ SEGMENT = 30          # 每次调用 Swift 的页数段（Vision 批量处理有
 SIGBUS = -10          # 128 + SIGBUS(10) = 138，subprocess 返回 -10
 
 
-def page_done(json_dir, n):
-    """该页 OCR 结果是否已存在"""
-    return os.path.isfile(os.path.join(json_dir, f"{n}.json"))
+def _atomic_write_text(path, text: str) -> None:
+    """同目录临时文件 + os.replace，避免中断留下半截文本。"""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
+def _atomic_write_json(path, data) -> None:
+    _atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def page_done(json_dir, n, img_dir=None):
+    """该页 OCR 结果是否可复用。
+
+    仅当 JSON 存在且不早于对应页图 mtime 时才算完成，避免源图更新后复用旧文本。
+    """
+    json_path = os.path.join(json_dir, f"{n}.json")
+    if not os.path.isfile(json_path):
+        return False
+    if img_dir:
+        img_path = os.path.join(img_dir, f"p{n}.jpg")
+        if os.path.isfile(img_path):
+            try:
+                if os.path.getmtime(json_path) < os.path.getmtime(img_path):
+                    return False
+            except OSError:
+                return False
+    return True
+
+
+def _clean_ocr_results(json_dir, txt_dir, valid_pages, img_dir):
+    """删除陈旧页的 JSON/TXT，返回失效页号集合。"""
+    stale = set()
+    if os.path.isdir(json_dir):
+        for name in os.listdir(json_dir):
+            if not name.endswith(".json"):
+                continue
+            stem = name[:-5]
+            if not stem.isdigit():
+                continue
+            n = int(stem)
+            if n not in valid_pages:
+                stale.add(n)
+                continue
+            img_path = os.path.join(img_dir, f"p{n}.jpg")
+            json_path = os.path.join(json_dir, name)
+            if not os.path.isfile(img_path):
+                stale.add(n)
+                continue
+            try:
+                if os.path.getmtime(json_path) < os.path.getmtime(img_path):
+                    stale.add(n)
+            except OSError:
+                stale.add(n)
+
+    for n in stale:
+        for path in (os.path.join(json_dir, f"{n}.json"),
+                     os.path.join(txt_dir, f"{n}.txt")):
+            if os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    if os.path.isdir(txt_dir):
+        for name in os.listdir(txt_dir):
+            if not name.endswith(".txt"):
+                continue
+            stem = name[:-4]
+            if stem.isdigit() and (int(stem) in stale or int(stem) not in valid_pages):
+                try:
+                    os.remove(os.path.join(txt_dir, name))
+                except OSError:
+                    pass
+    return stale
 
 
 def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
@@ -74,7 +155,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
 
     def need_ocr(p):
         """该页是否需要 OCR：force 时强制，否则 json 已存在则跳过。"""
-        return (force or not page_done(json_dir, p)) and img_exists(p)
+        return (force or not page_done(json_dir, p, img_dir)) and img_exists(p)
 
     def seg_run(a, b):
         want = [p for p in range(a, b + 1) if need_ocr(p)]
@@ -84,7 +165,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
                            capture_output=True, text=True)
         sys.stdout.write(r.stdout); sys.stdout.flush()
         sys.stderr.write(r.stderr); sys.stderr.flush()
-        got = [p for p in want if page_done(json_dir, p)]
+        got = [p for p in want if page_done(json_dir, p, img_dir)]
         new_ok = sorted(got)
         failed = len(got) < len(want)
         if failed:
@@ -117,7 +198,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
         crash_page = lo
         if need_ocr(crash_page):
             single_ok, single_crashed = seg_run(crash_page, crash_page)
-            if single_crashed and not page_done(json_dir, crash_page):
+            if single_crashed and not page_done(json_dir, crash_page, img_dir):
                 print(f"  [!] p{crash_page} 触发 Vision SIGBUS，已跳过（记录到 broken.txt）")
                 skipped_pages.add(crash_page)
                 with open(broken, "a", encoding="utf-8") as f:
@@ -131,8 +212,7 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
                 if need_ocr(p) and p not in skipped_pages]
         i = 0
 
-    with open(broken, "w", encoding="utf-8") as f:
-        f.write(" ".join(str(x) for x in sorted(skipped_pages)))
+    _atomic_write_text(broken, " ".join(str(x) for x in sorted(skipped_pages)))
     if skipped_pages:
         print(f"本次 OCR 跳过（Vision 崩溃）: {sorted(skipped_pages)}")
     else:
@@ -222,7 +302,7 @@ def run_ocr_rapidocr(img_dir, txt_dir, json_dir, start, end, force=False):
 
     engine = RapidOCR()
     todo = [n for n in range(start, end + 1)
-            if (force or not page_done(json_dir, n))
+            if (force or not page_done(json_dir, n, img_dir))
             and os.path.isfile(os.path.join(img_dir, f"p{n}.jpg"))]
     print(f"RapidOCR 待识别页: {len(todo)} 张" + ("" if force else "（已缓存跳过）"))
     for n in todo:
@@ -231,16 +311,14 @@ def run_ocr_rapidocr(img_dir, txt_dir, json_dir, start, end, force=False):
             width, height = im.size
         result = engine(str(img_path))
         lines, text = convert_rapidocr_result(result, width, height)
-        with open(os.path.join(txt_dir, f"{n}.txt"), "w", encoding="utf-8") as f:
-            f.write(text)
-        data = {"page": n, "lines": lines}
-        with open(os.path.join(json_dir, f"{n}.json"), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        _atomic_write_text(os.path.join(txt_dir, f"{n}.txt"), text)
+        _atomic_write_json(os.path.join(json_dir, f"{n}.json"),
+                           {"page": n, "lines": lines})
         print(f"  p{n}: {len(lines)} 行")
-    with open(os.path.join(json_dir, "broken.txt"), "w", encoding="utf-8") as f:
-        f.write("")
+    _atomic_write_text(os.path.join(json_dir, "broken.txt"), "")
 
 
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 PAGE_RE = re.compile(r"(\d+)")
 # _ocr_tmp 下的成品页图名：p{页号}.jpg（用于清理页号重排后不再使用的历史切片）
 TMP_PAGE_RE = re.compile(r"^p(\d+)\.jpg$")
@@ -273,10 +351,9 @@ def scan_pages(assets_dir):
     if not os.path.isdir(assets_dir):
         return pages
     # 仅图片为页源
-    _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
     items = []
     for f in os.listdir(assets_dir):
-        if not f.lower().endswith(_IMG_EXT):
+        if Path(f).suffix.lower() not in IMAGE_EXTS:
             continue
         m = PAGE_RE.search(f)
         if m:
@@ -457,6 +534,7 @@ def _trim_image(im, pad_ratio=0.01):
     gy[1:-1, :] = gray[2:, :] - gray[:-2, :]
     mag = np.sqrt(gx * gx + gy * gy)
     edge = mag > 30
+    del gx, gy, mag
     hist = np.bincount(gray.astype(np.int64).ravel(), minlength=256)
     bg = int(hist.argmax())
     # 滚动条列：列均灰度 150-210（灰带）+ bimodal（深+浅都>15%）+
@@ -473,6 +551,7 @@ def _trim_image(im, pad_ratio=0.01):
         starts = dark_mask[1:] & ~dark_mask[:-1]
         col_dark_runs = starts.sum(axis=0)
         col_dark_runs += dark_mask[0]  # 首行是暗也算一段开始
+        del starts, dark_mask
     # 滚动条列候选（两类）：
     #   ① 深/中灰滚动条：列均灰 150-210（灰带）+ bimodal（深+浅都>15%，轨道+滑块）
     #      + 暗像素段数少（滑块是连续一两段；K 线图内容列是大量分散蜡烛）。
@@ -576,11 +655,11 @@ def read_long_image_pages(out):
 def write_long_image_pages(out, long_image_pages):
     """把长图切分页记录写入文件（覆盖）。long_image_pages: {源文件名: [页号,...]}。"""
     p = long_image_pages_path(out)
-    os.makedirs(out, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        for name in sorted(long_image_pages):
-            nums = sorted(set(long_image_pages[name]))
-            f.write(f"{name}\t{','.join(str(x) for x in nums)}\n")
+    lines = []
+    for name in sorted(long_image_pages):
+        nums = sorted(set(long_image_pages[name]))
+        lines.append(f"{name}\t{','.join(str(x) for x in nums)}")
+    _atomic_write_text(p, "\n".join(lines) + ("\n" if lines else ""))
 
 
 def blank_pages_path(out):
@@ -603,16 +682,14 @@ def read_blank_pages(out):
 def write_blank_pages(out, page_nums):
     """把空白页号写入记录文件（覆盖），供后续流程统一过滤。"""
     p = blank_pages_path(out)
-    os.makedirs(out, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        f.write(" ".join(str(x) for x in sorted(set(page_nums))))
+    _atomic_write_text(p, " ".join(str(x) for x in sorted(set(page_nums))))
 
 
 def _alloc_page_numbers(preferred, count, used):
     """为一张长图的 count 个连续切片选起始页号。
 
     优先从 preferred（该素材在 assets 里的原始页号）开始，让页号尽量贴近原始编号；
-    若区间 [preferred, preferred+count) 与**已分配页号** used（别的长图切片）相交，
+    若区间 [preferred, preferred+count) 与**已占用页号** used（普通页或其他长图切片）相交，
     则把**整段**后移到 max(used)+1。
 
     为什么要整段后移而不是逐个跳过占用号：逐个跳号会把一张长图的切片页号打散，
@@ -665,10 +742,10 @@ def prepare_images(assets_dir, pages, out, force=defaults.FORCE,
     # 长图切分页：{源文件名: [切片页号]}——每张长图单独成章，不与其他混合
     long_image_pages = {}
     new_pages = dict(pages)
-    # 已分配页号：本轮已切出的长图切片。长图分配切片页号时必须避开它们——
-    # 一旦两组页号相交，同一批页会被两个"长图组"登记，auto_chapters 就会
-    # 把同一批页切成两篇文章（见 _alloc_page_numbers 注释）。
-    used_pages = set()
+    # 已占用页号：当前所有普通页 + 本轮已切出的长图切片。切片页号必须避开它们，
+    # 否则会覆盖普通页的 pN.jpg，或让同一批页属于两个长图组而重复成章。
+    used_pages = set(pages)
+    slice_pages = set()
     for n, fname in sorted(pages.items()):
         fname_key = fname
         src = os.path.join(assets_dir, fname)
@@ -676,9 +753,9 @@ def prepare_images(assets_dir, pages, out, force=defaults.FORCE,
         if not os.path.isfile(src):
             continue
         # 先判空白（放在 mtime 缓存判断之前），保证重跑时也能清掉历史残留的空白页
-        im = Image.open(src)
-        # 预处理：边缘检测裁四边空白 + 去掉右侧灰色滚动条（避免误识别为内容）
-        im = _trim_image(im)
+        with Image.open(src) as opened:
+            # 预处理：边缘检测裁四边空白 + 去掉右侧灰色滚动条（避免误识别为内容）
+            im = _trim_image(opened).copy()
         if _is_blank_image(im):
             # 仅当 p{n}.jpg 确属本文件时才删：页号 n 可能已被别的长图切片占用，
             # 那种情况下 dst 是别人的切片，删了就丢内容。
@@ -693,9 +770,9 @@ def prepare_images(assets_dir, pages, out, force=defaults.FORCE,
         if H > min_h and H / W >= max_ratio:
             rgb = _to_rgb(im)
             gray = np.asarray(rgb.convert("L"))
-            # 切片高度上限按图片宽度 × slice_ratio（≈内容区高/宽），让各片宽度受限
-            # → 图片宽度全页一致。
-            _slice_max_h = max(int(W * slice_ratio), min_h)
+            # 切片高度上限同时受调用方 max_h 与图片宽度 × slice_ratio 约束，
+            # 并保证不低于 min_h。
+            _slice_max_h = max(min_h, min(max_h, int(W * slice_ratio)))
             cuts = _find_split_points(gray, max_h=_slice_max_h, min_h=min_h)
             if cuts:
                 # 清掉本文件可能存在的旧切片/旧单页（只删属于本文件 fname 的页，
@@ -714,6 +791,10 @@ def prepare_images(assets_dir, pages, out, force=defaults.FORCE,
                     else:
                         merged.append((y0, y1))
                 merged = [seg for seg in merged if seg[1] - seg[0] >= 200]
+                # 当前长图的原始页号已让给切片，不再视为"被普通页占用"；
+                # 但已被别的长图切片占用时必须保留，避免两组相交。
+                if n not in slice_pages:
+                    used_pages.discard(n)
                 # 连续编号：优先从 n 开始；与已分配页号相交则整段后移（见 helper 注释）
                 _pn = _alloc_page_numbers(n, len(merged), used_pages)
                 for y0, y1 in merged:
@@ -722,6 +803,7 @@ def prepare_images(assets_dir, pages, out, force=defaults.FORCE,
                     new_pages[_pn] = fname_key
                     long_image_pages.setdefault(fname_key, []).append(_pn)
                     used_pages.add(_pn)
+                    slice_pages.add(_pn)
                     _pn += 1
                 if merged:
                     sliced += 1
@@ -788,10 +870,31 @@ def run(images_dir, work_dir, start=None, end=None, force=defaults.FORCE,
     bin_path = None
     if engine == "swift":
         bin_path = str(ocr_cache / "ocr_batch")
-        if not os.path.exists(bin_path):
+        stale = (not os.path.exists(bin_path)
+                 or (SWIFT_SRC.exists()
+                     and os.path.getmtime(bin_path) < os.path.getmtime(SWIFT_SRC)))
+        if stale:
             if not SWIFT_SRC.exists():
                 raise SystemExit(f"错误：找不到 ocr_batch.swift（{SWIFT_SRC}）")
             subprocess.run(["swiftc", "-o", bin_path, str(SWIFT_SRC)], check=True)
+
+    source = Path(images_dir).expanduser().resolve()
+    if source.is_file():
+        if source.suffix.lower() not in IMAGE_EXTS:
+            raise SystemExit(f"错误：不支持的图片文件 {source}")
+        staged = paths.single_input_dir(out)
+        try:
+            if staged.exists():
+                shutil.rmtree(staged)
+            staged.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, staged / f"p1{source.suffix.lower()}")
+        except Exception as exc:
+            raise SystemExit(f"错误：单张图片准备失败 {source}: {exc}") from exc
+        images_dir = str(staged)
+    elif not source.is_dir():
+        raise SystemExit(f"错误：图片目录或文件不存在 {source}")
+    else:
+        images_dir = str(source)
 
     pages = scan_pages(images_dir)
     if not pages:
@@ -817,17 +920,20 @@ def run(images_dir, work_dir, start=None, end=None, force=defaults.FORCE,
 
     pages_dir = paths.ocr_pages_dir(out)
     json_dir = paths.ocr_pages_json_dir(out)
-    if json_dir.is_dir() and not force:
-        print("复用 OCR 缓存:", ocr_cache)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    json_dir.mkdir(parents=True, exist_ok=True)
+    stale = _clean_ocr_results(str(json_dir), str(pages_dir),
+                               set(pages), img_for_ocr)
+    if stale:
+        shown = " ".join(str(p) for p in sorted(stale)[:10])
+        print(f"  已失效并重跑 OCR 缓存 {len(stale)} 页: {shown}"
+              f"{' ...' if len(stale) > 10 else ''}")
+    if engine == "swift":
+        print("运行 OCR（macOS Vision, zh-Hans + en，逐页复用缓存）...")
+        run_ocr_resilient(bin_path, img_for_ocr, str(pages_dir), str(json_dir),
+                          start, end, reuse_broken=False, force=force)
     else:
-        pages_dir.mkdir(parents=True, exist_ok=True)
-        json_dir.mkdir(parents=True, exist_ok=True)
-        if engine == "swift":
-            print("运行 OCR（macOS Vision, zh-Hans + en）...")
-            run_ocr_resilient(bin_path, img_for_ocr, str(pages_dir), str(json_dir),
-                              start, end, reuse_broken=False, force=force)
-        else:
-            print("运行 OCR（RapidOCR, 中文小模型）...")
-            run_ocr_rapidocr(img_for_ocr, str(pages_dir), str(json_dir),
-                             start, end, force=force)
+        print("运行 OCR（RapidOCR, 中文小模型，逐页复用缓存）...")
+        run_ocr_rapidocr(img_for_ocr, str(pages_dir), str(json_dir),
+                         start, end, force=force)
     return img_for_ocr, start, end

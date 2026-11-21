@@ -16,6 +16,7 @@ Python 脚本，对 OCR lines 做清理/修改。
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Callable, Optional
 
 from . import defaults, paths
 
@@ -31,14 +32,16 @@ def _load_module(script_path: Path):
     return module
 
 
-def _run_script(work_dir, rel, log_label, base_dir: Path) -> bool:
+def _run_script(work_dir, rel, log_label, base_dir: Path,
+                log: Optional[Callable[[str], None]] = None) -> bool:
     """运行一个 OCR 钩子脚本。rel 为脚本路径，相对路径按 base_dir 解析。"""
+    say = log or (lambda _msg: None)
     script = Path(str(rel)).expanduser()
     if not script.is_absolute():
         script = base_dir / script
     ocr_dir = str(paths.ocr_pages_json_dir(work_dir))
     if not script.is_file():
-        print(f"  ⚠ {log_label}脚本未找到: {script}")
+        say(f"  ⚠ {log_label}脚本未找到: {script}")
         return False
     if not Path(ocr_dir).is_dir():
         return False
@@ -46,13 +49,15 @@ def _run_script(work_dir, rel, log_label, base_dir: Path) -> bool:
     fn = getattr(module, "process", None)
     if fn is None:
         raise AttributeError(f"{log_label}脚本 {script} 未定义 process(ocr_dir, base_dir)")
-    print(f"  (运行 OCR {log_label}: {script.name})")
+    say(f"  (运行 OCR {log_label}: {script.name})")
     fn(ocr_dir, str(base_dir))
     return True
 
 
-def run_middlewares(work_dir, middlewares=None, base_dir=None) -> int:
-    """按序运行调用方传入的中间件脚本，返回运行数量。"""
+def run_middlewares(work_dir, middlewares=None, base_dir=None,
+                    log: Optional[Callable[[str], None]] = None) -> int:
+    """按序运行调用方传入的中间件脚本，返回**实际运行**数量。"""
+    say = log or (lambda _msg: None)
     base = Path(base_dir).expanduser().resolve() if base_dir else Path.cwd()
     n = 0
     for item in (middlewares or []):
@@ -65,14 +70,16 @@ def run_middlewares(work_dir, middlewares=None, base_dir=None) -> int:
             continue
         if not label:
             label = Path(str(rel)).stem
-        _run_script(work_dir, rel, label, base)
-        n += 1
+        if _run_script(work_dir, rel, label, base, say):
+            n += 1
     return n
 
 
 def run_all(work_dir, middlewares=None,
-            ocr_fix_global=defaults.OCR_FIX_GLOBAL, base_dir=None) -> None:
+            ocr_fix_global=defaults.OCR_FIX_GLOBAL, base_dir=None,
+            log: Optional[Callable[[str], None]] = None) -> None:
     """detect 前一次性运行全部 OCR 处理：中间件脚本 → 内置通用纠错。"""
-    run_middlewares(work_dir, middlewares, base_dir)
+    say = log or (lambda _msg: None)
+    run_middlewares(work_dir, middlewares, base_dir, say)
     from .ocr_fix import run_global_fix
-    run_global_fix(work_dir, enabled=ocr_fix_global)
+    run_global_fix(work_dir, enabled=ocr_fix_global, log=say)
