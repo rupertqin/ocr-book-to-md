@@ -1,0 +1,24 @@
+# -*- coding: utf-8 -*-
+"""p2md 默认参数（唯一来源）。
+
+库调用与 CLI 都从这里取默认值，避免两处漂移。所有运行时配置都由调用方显式传入。
+"""
+
+SPLIT_LONG_IMAGE_MAX_RATIO = 3.0
+SPLIT_SLICE_MAX_H = 2600
+SPLIT_SLICE_MIN_H = 1400
+SPLIT_SLICE_RATIO = 3.0
+
+MIN_HEADING_RATIO = 1.28
+BOLD_THICKNESS_RATIO = 0.078
+HEADING_PLAIN_RATIO = 1.18
+HEADING_PAGE_BASE = True
+BOLD_USE_PAGE_H = True
+
+OCR_FIX_GLOBAL = True
+FORCE = False
+ENGINE = None
+START = None
+END = None
+MIDDLEWARES = None
+CHAPTERS = None

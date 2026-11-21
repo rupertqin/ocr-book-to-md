@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from . import defaults, paths
+
 # 包内 swift 源文件路径（与 __init__.py 同级，随 wheel 一起分发）
 HERE = Path(__file__).resolve().parent
 SWIFT_SRC = HERE / "ocr_batch.swift"
@@ -140,28 +142,13 @@ def run_ocr_resilient(bin_path, img_dir, txt_dir, json_dir, start, end,
 VALID_ENGINES = ("swift", "rapidocr")
 
 
-def resolve_engine(config=None, override=None):
-    """选择 OCR 引擎：显式参数 > 环境变量 > 配置 > 平台默认。
+def resolve_engine(override=None):
+    """选择 OCR 引擎：只接受显式参数，否则按平台默认。
 
-    - ``override``：CLI ``--engine`` / 库调用传入的显式选择（最高优先级）。
-    - 环境变量 ``P2MD_ENGINE``：覆盖项目配置，便于临时切换。
-    - 项目配置 ``p2md.engine``（.env 对应 ``P2MD_ENGINE``）。
-    - 旧名 ``P2MD_OCR_BACKEND`` / ``book.ocr_backend`` 仍兼容。
-    - ``auto`` 或未指定时按平台默认：macOS → Swift Vision，其他 → RapidOCR。
+    - ``override``：CLI ``--engine`` / 库调用传入的显式选择。
+    - ``auto`` 或 ``None``：macOS → Swift Vision，其他 → RapidOCR。
     """
     value = override
-    if not value:
-        value = os.environ.get("P2MD_ENGINE") or os.environ.get("P2MD_OCR_BACKEND")
-    if not value and config is not None:
-        try:
-            value = config.get_engine()
-        except Exception:
-            value = None
-    if not value and config is not None:
-        try:
-            value = config.get('book.ocr_backend', None)
-        except Exception:
-            value = None
     if value is None:
         value = "auto"
     normalized = str(value).strip().lower()
@@ -285,7 +272,7 @@ def scan_pages(assets_dir):
     pages = {}
     if not os.path.isdir(assets_dir):
         return pages
-    # 仅图片为"页源"；PDF 由 prepare_pdf_sources 单独展开（assets 里可混放）
+    # 仅图片为页源
     _IMG_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
     items = []
     for f in os.listdir(assets_dir):
@@ -614,7 +601,7 @@ def read_blank_pages(out):
 
 
 def write_blank_pages(out, page_nums):
-    """把空白页号写入记录文件（覆盖），供 PDF 各流最终制作时统一过滤。"""
+    """把空白页号写入记录文件（覆盖），供后续流程统一过滤。"""
     p = blank_pages_path(out)
     os.makedirs(out, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -625,8 +612,8 @@ def _alloc_page_numbers(preferred, count, used):
     """为一张长图的 count 个连续切片选起始页号。
 
     优先从 preferred（该素材在 assets 里的原始页号）开始，让页号尽量贴近原始编号；
-    若区间 [preferred, preferred+count) 与**已分配页号** used（别的长图切片 / PDF
-    渲染页）相交，则把**整段**后移到 max(used)+1。
+    若区间 [preferred, preferred+count) 与**已分配页号** used（别的长图切片）相交，
+    则把**整段**后移到 max(used)+1。
 
     为什么要整段后移而不是逐个跳过占用号：逐个跳号会把一张长图的切片页号打散，
     跨页渲染时切片顺序错乱。为什么绝不能与 used 重叠：同一批页被两个"长图组"
@@ -640,8 +627,11 @@ def _alloc_page_numbers(preferred, count, used):
     return preferred
 
 
-def prepare_images(assets_dir, pages, out, force=False,
-                   max_ratio=3.0, max_h=2600, min_h=1400, slice_ratio=3.0):
+def prepare_images(assets_dir, pages, out, force=defaults.FORCE,
+                   max_ratio=defaults.SPLIT_LONG_IMAGE_MAX_RATIO,
+                   max_h=defaults.SPLIT_SLICE_MAX_H,
+                   min_h=defaults.SPLIT_SLICE_MIN_H,
+                   slice_ratio=defaults.SPLIT_SLICE_RATIO):
     """把输入图片统一归一化为 JPEG，输出到 <out>/_ocr_tmp/。
     返回 (临时图片目录, 展开后的 pages 字典)。完全沿用 run.py 的 prepare_images。
 
@@ -661,8 +651,8 @@ def prepare_images(assets_dir, pages, out, force=False,
         max_ratio: 超过该高宽比即视为超长图，触发切分
         max_h / min_h: 切分后每片高度区间（px）
         slice_ratio: 切片高度上限相对图片宽度的比例（约=内容区高/宽）。
-            超长图每片高 ≤ max(slice_ratio*W, min_h)，这样在 layed 流里各片
-            都是宽度受限（scale=content_w/W）→ 图片宽度全页一致，不出现"页面宽度不一"。
+            超长图每片高 ≤ max(slice_ratio*W, min_h)，使各片宽度受限
+            （scale=content_w/W）→ 图片宽度全页一致，不出现"页面宽度不一"。
     Returns:
         (tmp, pages)：tmp 为预处理图目录，pages 为展开（含切片子页）后的页号映射
     """
@@ -675,23 +665,13 @@ def prepare_images(assets_dir, pages, out, force=False,
     # 长图切分页：{源文件名: [切片页号]}——每张长图单独成章，不与其他混合
     long_image_pages = {}
     new_pages = dict(pages)
-    # 已分配页号：PDF 渲染页 + 本轮已切出的长图切片。长图分配切片页号时必须避开
-    # 它们——一旦两组页号相交，同一批页会被两个"长图组"登记，auto_chapters 就会
+    # 已分配页号：本轮已切出的长图切片。长图分配切片页号时必须避开它们——
+    # 一旦两组页号相交，同一批页会被两个"长图组"登记，auto_chapters 就会
     # 把同一批页切成两篇文章（见 _alloc_page_numbers 注释）。
-    used_pages = {pn for pn, f in new_pages.items()
-                  if isinstance(f, str) and f.startswith("[pdf]")}
+    used_pages = set()
     for n, fname in sorted(pages.items()):
-        # PDF 渲染页（prepare_pdf_sources 已写入 <out>/_ocr_tmp/p{n}.jpg）源不在
-        # assets_dir，指向 tmp 下已渲染文件；普通图源在 assets_dir。
-        is_pdf_page = isinstance(fname, str) and fname.startswith("[pdf]")
-        if is_pdf_page:
-            # long_image_pages/组名统一用**真实文件名**(去 [pdf] 前缀)——否则与
-            # prepare_pdf_sources 用纯文件名登记的组不一致, 会把同一 PDF 拆成两章。
-            fname_key = fname[len("[pdf]"):]
-            src = os.path.join(tmp, f"p{n}.jpg")
-        else:
-            fname_key = fname
-            src = os.path.join(assets_dir, fname)
+        fname_key = fname
+        src = os.path.join(assets_dir, fname)
         dst = os.path.join(tmp, f"p{n}.jpg")
         if not os.path.isfile(src):
             continue
@@ -709,18 +689,12 @@ def prepare_images(assets_dir, pages, out, force=False,
             continue
 
         W, H = im.size
-        if is_pdf_page:
-            # PDF 源：src 就是成品 <out>/_ocr_tmp/p{n}.jpg 本身（render_pdf_pages 已
-            # 渲染并切好），无需再复制/转存——否则 --force 时下面 copyfile(src, dst)
-            # 是同文件，会抛 SameFileError。
-            continue
-        # 超长图 → 内容感知切分。PDF 渲染页已在 render_pdf_pages 阶段按同样规则
-        # 切好（每片 ratio<3），此处若再切会与后续切片页号冲突、误删相邻片 → 跳过。
-        if not is_pdf_page and H > min_h and H / W >= max_ratio:
+        # 超长图 → 内容感知切分
+        if H > min_h and H / W >= max_ratio:
             rgb = _to_rgb(im)
             gray = np.asarray(rgb.convert("L"))
-            # 切片高度上限按图片宽度 × slice_ratio（≈内容区高/宽），保证 layed 里各片
-            # 都是宽度受限 → 图片宽度全页一致。
+            # 切片高度上限按图片宽度 × slice_ratio（≈内容区高/宽），让各片宽度受限
+            # → 图片宽度全页一致。
             _slice_max_h = max(int(W * slice_ratio), min_h)
             cuts = _find_split_points(gray, max_h=_slice_max_h, min_h=min_h)
             if cuts:
@@ -780,74 +754,59 @@ def prepare_images(assets_dir, pages, out, force=False,
                 pass
     # **按当前素材重建**（不再 merge 历史）long_image_pages：素材被删除/改名或
     # 页号被重排后，旧分组残留就会变成"幽灵章节"（auto_chapters 是逐组各自成篇，
-    # 会凭空多出重复/无源篇目）。PDF 源分组由 prepare_pdf_sources 先写入，这里从
-    # pages 的 [pdf] 标记还原，避免重建时把它洗掉。
-    _lip = {}
-    for _pn, _f in pages.items():
-        if isinstance(_f, str) and _f.startswith("[pdf]"):
-            _lip.setdefault(_f[len("[pdf]"):], []).append(_pn)
-    _lip.update(long_image_pages)
-    write_long_image_pages(out, _lip)
+    # 会凭空多出重复/无源篇目）。
+    write_long_image_pages(out, long_image_pages)
     print(f"图片预处理完成：{copied} 张 JPEG 直接复制 + {converted} 张转 JPEG"
           f" + {blank} 张空白过滤 + {sliced} 张长图切分（临时目录 {tmp}）")
     return tmp, new_pages
 
 
-def run(project, assets_dir, start=None, end=None, force=False, engine=None):
-    """对项目执行 OCR 步骤。
+def run(images_dir, work_dir, start=None, end=None, force=defaults.FORCE,
+        engine=defaults.ENGINE,
+        split_long_image_max_ratio=defaults.SPLIT_LONG_IMAGE_MAX_RATIO,
+        split_slice_max_h=defaults.SPLIT_SLICE_MAX_H,
+        split_slice_min_h=defaults.SPLIT_SLICE_MIN_H,
+        split_slice_ratio=defaults.SPLIT_SLICE_RATIO):
+    """执行 OCR 步骤。
 
     Args:
-        project: Project 实例
-        assets_dir: 源图目录（已解析）
+        images_dir: 源图片目录
+        work_dir: 中间产物根目录
         start/end: 页码范围（None=自动探测）
         force: 是否忽略 OCR 缓存
-        engine: 显式指定 OCR 引擎（auto/swift/rapidocr），None=走配置/环境/平台默认
+        engine: OCR 引擎（auto/swift/rapidocr），None=按平台默认
+        split_*: 超长图切分参数
     Returns:
         (img_for_ocr, start, end)：预处理后的图目录与最终范围
     """
-    out = str(project.output_dir)
-    os.makedirs(out, exist_ok=True)
-    ocr_cache = project.get_ocr_dir()
-    os.makedirs(ocr_cache, exist_ok=True)
+    out = paths.work_path(work_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    ocr_cache = paths.ocr_dir(out)
+    ocr_cache.mkdir(parents=True, exist_ok=True)
 
-    # 超长图/超长 PDF 页切分参数（可配置）
-    from .config import Config
-    _cfg = Config(str(project.path))
-    engine = resolve_engine(_cfg, override=engine)
+    engine = resolve_engine(engine)
     bin_path = None
     if engine == "swift":
-        bin_path = os.path.join(ocr_cache, "ocr_batch")
+        bin_path = str(ocr_cache / "ocr_batch")
         if not os.path.exists(bin_path):
             if not SWIFT_SRC.exists():
                 raise SystemExit(f"错误：找不到 ocr_batch.swift（{SWIFT_SRC}）")
             subprocess.run(["swiftc", "-o", bin_path, str(SWIFT_SRC)], check=True)
 
-    pages = scan_pages(assets_dir)
+    pages = scan_pages(images_dir)
+    if not pages:
+        raise SystemExit(f"错误：目录 {images_dir} 里没有图片输入")
     print(f"图片页: {len(pages)}")
 
-    _max_ratio = float(_cfg.get_p2md('split_long_image_max_ratio', 3.0))
-    _max_h = int(_cfg.get_p2md('split_slice_max_h', 2600))
-    _min_h = int(_cfg.get_p2md('split_slice_min_h', 1400))
-    _slice_ratio = float(_cfg.get_p2md('split_slice_ratio', 3.0))
-
-    # PDF 源：assets 里的 .pdf 渲染成页图（_ocr_tmp/p{n}.jpg），登记 long_image_pages
-    # 渲染时对"单页即超长滚动截图"的 PDF 页也做切分（页号连续顺延）。
-    from .pdfsource import prepare_pdf_sources
-    pages, _pdf_pages = prepare_pdf_sources(
-        assets_dir, out, pages, force=force,
-        max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
-        slice_ratio=_slice_ratio)
-    if not pages:
-        raise SystemExit(f"错误：目录 {assets_dir} 里没有图片或 .pdf 输入")
     rng = auto_page_range(pages)
     start = start if start is not None else rng[0]
     end = end if end is not None else rng[1]
     print(f"共 {len(pages)} 页，OCR 范围 p{start}..p{end}")
 
     img_for_ocr, pages = prepare_images(
-        assets_dir, pages, out, force=force,
-        max_ratio=_max_ratio, max_h=_max_h, min_h=_min_h,
-        slice_ratio=_slice_ratio)
+        images_dir, pages, str(out), force=force,
+        max_ratio=split_long_image_max_ratio, max_h=split_slice_max_h,
+        min_h=split_slice_min_h, slice_ratio=split_slice_ratio)
 
     # 切分后页号可能扩展（长图→多片），用展开后的 pages 重算范围
     rng2 = auto_page_range(pages)
@@ -856,21 +815,19 @@ def run(project, assets_dir, start=None, end=None, force=False, engine=None):
     if rng2:
         start = min(start, rng2[0]) if start is not None else rng2[0]
 
-    if os.path.isdir(os.path.join(ocr_cache, "pages_json")) and not force:
+    pages_dir = paths.ocr_pages_dir(out)
+    json_dir = paths.ocr_pages_json_dir(out)
+    if json_dir.is_dir() and not force:
         print("复用 OCR 缓存:", ocr_cache)
     else:
-        os.makedirs(project.get_ocr_pages_dir(), exist_ok=True)
-        os.makedirs(project.get_ocr_pages_json_dir(), exist_ok=True)
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        json_dir.mkdir(parents=True, exist_ok=True)
         if engine == "swift":
             print("运行 OCR（macOS Vision, zh-Hans + en）...")
-            run_ocr_resilient(bin_path, img_for_ocr,
-                              str(project.get_ocr_pages_dir()),
-                              str(project.get_ocr_pages_json_dir()),
+            run_ocr_resilient(bin_path, img_for_ocr, str(pages_dir), str(json_dir),
                               start, end, reuse_broken=False, force=force)
         else:
             print("运行 OCR（RapidOCR, 中文小模型）...")
-            run_ocr_rapidocr(img_for_ocr,
-                             str(project.get_ocr_pages_dir()),
-                             str(project.get_ocr_pages_json_dir()),
+            run_ocr_rapidocr(img_for_ocr, str(pages_dir), str(json_dir),
                              start, end, force=force)
     return img_for_ocr, start, end

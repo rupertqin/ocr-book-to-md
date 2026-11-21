@@ -3,7 +3,7 @@
 
 章节边界从 blocks 的 heading 自动推导（"第X章"/"第X编"/"参考文献"）。
 
-产物（project/output/ 下）：
+产物（<work_dir>/ 下）：
     md/                         传统章节 Markdown（保留便于复核）
     content/article_N.md        每章一篇文章（Markdown 交付物）
     content/images/             裁图（article 内的图片引用统一改为 images/）
@@ -13,6 +13,8 @@ import json
 import os
 import re
 import shutil
+
+from . import paths
 
 CN = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
       "七": 7, "八": 8, "九": 9, "十": 10}
@@ -983,30 +985,31 @@ def _clean_stale_tmp(output_dir):
             print(f"  清理历史临时目录: {p}")
 
 
-def build(project, chapters=None):
+def build(work_dir, chapters=None):
     """组装章节 Markdown，并产出 article 目录（每章一文件 + images/）。
 
     Args:
-        project: Project 实例
+        work_dir: 中间产物根目录
         chapters: 可选人工章节结构（list of dict，含 kind/slug/file/title/start/end）
     Returns:
         (md_dir, article_dir, chapters)
     """
-    _clean_stale_tmp(project.output_dir)
-    blocks_dir = str(project.get_blocks_dir())
-    figs_dir = str(project.get_figs_dir())
-    md_dir = str(project.get_md_dir())
-    article_dir = str(project.get_article_dir())
-    images_out = str(project.get_images_out_dir())
+    work = paths.work_path(work_dir)
+    _clean_stale_tmp(str(work))
+    blocks_dir = str(paths.blocks_dir(work))
+    figs_dir = str(paths.figs_dir(work))
+    md_dir = str(paths.md_dir(work))
+    article_dir = str(paths.article_dir(work))
+    images_out = str(paths.images_dir(work))
 
     if not os.path.isdir(blocks_dir):
         raise SystemExit(f"错误：未找到 blocks 目录 {blocks_dir}\n"
-                         f"  请先运行布局分析：python main.py detect -p <project>")
+                         f"  请先运行布局分析（p2md detect / convert）")
     if not os.path.isdir(figs_dir):
         raise SystemExit(f"错误：未找到 figs 目录 {figs_dir}\n"
-                         f"  请先运行布局分析：python main.py detect -p <project>")
+                         f"  请先运行布局分析（p2md detect / convert）")
 
-    md_tmp = os.path.join(project.output_dir, f".md.tmp.{os.getpid()}")
+    md_tmp = os.path.join(str(work), f".md.tmp.{os.getpid()}")
     os.makedirs(md_tmp, exist_ok=True)
 
     if chapters is None:
@@ -1029,7 +1032,7 @@ def build(project, chapters=None):
 
     # ---- 产出 article 目录（每章一个 md + images/） ----
     # 每章 → article_N.md；图片引用 ../figs/ → images/；裁图复制到 content/images/
-    article_tmp = os.path.join(project.output_dir, f".article.tmp.{os.getpid()}")
+    article_tmp = os.path.join(str(work), f".article.tmp.{os.getpid()}")
     images_tmp = os.path.join(article_tmp, "images")
     os.makedirs(article_tmp, exist_ok=True)
     os.makedirs(images_tmp, exist_ok=True)

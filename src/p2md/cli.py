@@ -1,95 +1,188 @@
 # -*- coding: utf-8 -*-
-"""p2md 统一 CLI：init / pdftotext / ocr / detect / build / pipeline。
+"""p2md CLI：ocr / detect / build / pipeline。
 
-只产出 Markdown 与裁图；不生成 PDF，不依赖 document-factory。
-OCR 默认在 macOS 用 Swift Vision，其他平台用 RapidOCR；
-可用 --engine / P2MD_ENGINE / config.yaml 的 p2md.engine 切换。
+接受图片输入，产出 Markdown 与裁图。参数来自命令行与显式 ``--config`` 文件，
+命令行参数优先。
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
-from .project import Project
-from .config import Config
+from . import defaults, paths
 
 
-def _print_summary(project: Project) -> None:
-    from pathlib import Path
+def _load_config(path):
+    if not path:
+        return {}, None
+    from .config_file import load_config
+    return load_config(path)
 
-    out = project.output_dir
-    article_dir = project.get_article_dir()
+
+def _pick(args, cfg, arg_name, cfg_names, default=None):
+    value = getattr(args, arg_name, None)
+    if value is not None:
+        return value
+    for key in cfg_names:
+        if key in cfg:
+            return cfg[key]
+    return default
+
+
+def _path_value(value, base):
+    if value is None:
+        return None
+    p = Path(str(value)).expanduser()
+    if p.is_absolute():
+        return str(p)
+    return str((base / p).resolve() if base else p.resolve())
+
+
+def _middlewares(value, base):
+    if not value:
+        return None
+    resolved = []
+    for item in value:
+        if isinstance(item, dict):
+            out = dict(item)
+            key = "script" if "script" in out else "path"
+            if key in out:
+                out[key] = _path_value(out[key], base)
+            resolved.append(out)
+        else:
+            resolved.append(_path_value(item, base))
+    return resolved
+
+
+def _require(value, name):
+    if not value:
+        raise SystemExit(f"错误：请用 --{name} 或配置文件提供该参数")
+    return value
+
+
+def _resolve_work(work, images=None) -> Path:
+    if work:
+        return paths.work_path(work)
+    base = Path.cwd() / ".derived" / "ocr"
+    if images:
+        base = base / Path(images).expanduser().resolve().name
+    return base.resolve()
+
+
+def _print_summary(work_dir) -> None:
+    work = paths.work_path(work_dir)
+    article_dir = paths.article_dir(work)
+    img_dir = paths.images_dir(work)
     n_art = len([f for f in os.listdir(article_dir) if f.endswith('.md')]) \
         if os.path.isdir(article_dir) else 0
-    img_dir = project.get_images_out_dir()
     n_img = len([f for f in os.listdir(img_dir) if f.endswith('.png')]) \
         if os.path.isdir(img_dir) else 0
-    print(f"\n项目: {project.path}")
+    print(f"\n工作目录: {work}")
     print(f"  content/  {n_art} 章 Markdown")
     print(f"  content/images/  {n_img} 张裁图")
-    print(f"  md/      章节 Markdown（便于复核）")
-    print(f"  blocks/  布局中间产物（{len(list(Path(out / 'blocks').glob('*.json'))) if (out / 'blocks').is_dir() else 0} 页）")
-    print(f"  ocr/     OCR 中间产物")
+    print("  md/      章节 Markdown（便于复核）")
+    print("  blocks/  布局中间产物")
+    print("  ocr/     OCR 中间产物")
+
+
+def _add_config_arg(p) -> None:
+    p.add_argument('-c', '--config', default=None,
+                   help='配置文件（YAML/JSON）；命令行参数优先')
+
+
+def _add_engine_args(p) -> None:
+    p.add_argument('--engine', choices=('auto', 'swift', 'rapidocr'),
+                   default=None, help='OCR 引擎（默认按平台选择）')
+
+
+def _add_split_args(p) -> None:
+    p.add_argument('--split-long-image-max-ratio', type=float, default=None,
+                   help='高宽比超过该值视为超长图（0 关闭，默认 3.0）')
+    p.add_argument('--split-slice-max-h', type=int, default=None,
+                   help='长图切片最大高度（px）')
+    p.add_argument('--split-slice-min-h', type=int, default=None,
+                   help='长图切片最小高度（px）')
+    p.add_argument('--split-slice-ratio', type=float, default=None,
+                   help='切片高/宽比上限')
+
+
+def _add_detect_args(p) -> None:
+    p.add_argument('--min-heading-ratio', type=float, default=None,
+                   help='标题/正文字号最小比例')
+    p.add_argument('--bold-thickness-ratio', type=float, default=None,
+                   help='加粗判定阈值')
+    p.add_argument('--heading-plain-ratio', type=float, default=None,
+                   help='非彩色标题最小字号比例')
+    p.add_argument('--heading-page-base', action=argparse.BooleanOptionalAction,
+                   default=None, help='按长图组统一字号基准')
+    p.add_argument('--bold-use-page-h', action=argparse.BooleanOptionalAction,
+                   default=None, help='用组级字号归一化加粗')
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='p2md',
-        description='p2md - 扫描书 / 长截图转 Markdown（OCR → 图/标题/正文三分 → 章节 Markdown）',
+        description='p2md - 图片（扫描页 / 长截图）转 Markdown（OCR → 版面分析 → 章节 Markdown）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 命令:
-  init        初始化项目（生成 config.yaml + .env + assets/）
-  pdftotext   PDF 文字层直取 Markdown（无文字层的扫描 PDF 用 pipeline）
-  ocr         OCR → output/ocr/（--engine 可选 auto/swift/rapidocr）
-  detect      版面分析 → output/blocks + output/figs
-  build       组装章节 → output/md + output/content/article_N.md
-  pipeline    全部流程：ocr → detect → build
+  ocr         OCR → <work>/ocr/
+  detect      版面分析 → <work>/blocks + <work>/figs
+  build       组装章节 → <work>/md + <work>/content
+  pipeline    全流程：ocr → middleware → detect → build
 
 示例:
-  p2md init -p ./projects/进化心理学
-  p2md pipeline -p ./projects/进化心理学
-  p2md build -p ./projects/进化心理学
+  p2md pipeline --config ./projects/么瑞/config.yaml
+  p2md pipeline --images ./assets --work ./work --out ./out
+  p2md ocr --images ./assets --engine rapidocr --force
+  p2md build --work ./work
         """
     )
-    parser.add_argument('--version', action='version', version='p2md 0.3.0')
+    parser.add_argument('--version', action='version', version='p2md 0.5.0')
     sub = parser.add_subparsers(dest='command', help='可用命令')
 
-    init_p = sub.add_parser('init', help='初始化项目')
-    init_p.add_argument('-p', '--project', default='.', help='项目目录（默认当前目录）')
-
-    pdft_p = sub.add_parser('pdftotext', help='PDF 文字层 → Markdown（免 OCR）')
-    pdft_p.add_argument('-p', '--project', default='.', help='项目目录')
-    pdft_p.add_argument('--dpi', type=int, default=150, help='嵌图渲染分辨率（默认 150）')
-    pdft_p.add_argument('--out', default=None, help='输出目录（默认 output/pdf_text/）')
-
     ocr_p = sub.add_parser('ocr', help='OCR 步骤')
-    ocr_p.add_argument('-p', '--project', default='.', help='项目目录')
-    ocr_p.add_argument('--assets', default=None, help='输入素材目录（图片或 PDF）')
+    _add_config_arg(ocr_p)
+    ocr_p.add_argument('--images', default=None, help='输入图片目录')
+    ocr_p.add_argument('--work', default=None, help='中间产物目录')
     ocr_p.add_argument('--start', type=int, default=None, help='起始页')
     ocr_p.add_argument('--end', type=int, default=None, help='结束页')
     ocr_p.add_argument('-f', '--force', action='store_true', default=None,
                        help='忽略 OCR 缓存，重跑全部页')
-    ocr_p.add_argument('--engine', choices=('auto', 'swift', 'rapidocr'),
-                       default=None, help='OCR 引擎（覆盖环境变量与配置；默认按平台）')
+    _add_engine_args(ocr_p)
+    _add_split_args(ocr_p)
 
     det_p = sub.add_parser('detect', help='布局分析步骤')
-    det_p.add_argument('-p', '--project', default='.', help='项目目录')
-    det_p.add_argument('--assets', default=None, help='输入素材目录（默认预处理 JPEG）')
+    _add_config_arg(det_p)
+    det_p.add_argument('--images', default=None, help='输入图片目录')
+    det_p.add_argument('--work', default=None, help='中间产物目录')
     det_p.add_argument('pages', nargs='*', type=int, help='仅处理指定页（调试用）')
+    _add_detect_args(det_p)
 
     bld_p = sub.add_parser('build', help='组装 Markdown')
-    bld_p.add_argument('-p', '--project', default='.', help='项目目录')
+    _add_config_arg(bld_p)
+    bld_p.add_argument('--work', default=None, help='中间产物目录')
     bld_p.add_argument('--chapters', default=None, help='人工章节结构 JSON')
 
-    pipe_p = sub.add_parser('pipeline', help='全流程：ocr → detect → build')
-    pipe_p.add_argument('-p', '--project', default='.', help='项目目录')
-    pipe_p.add_argument('--assets', default=None, help='输入素材目录（图片或 PDF）')
+    pipe_p = sub.add_parser('pipeline', help='全流程')
+    _add_config_arg(pipe_p)
+    pipe_p.add_argument('--images', default=None, help='输入图片目录')
+    pipe_p.add_argument('--work', default=None, help='中间产物目录')
+    pipe_p.add_argument('--out', default=None, help='最终 Markdown 复制目标')
+    pipe_p.add_argument('--base-dir', default=None, help='中间件脚本相对路径基准')
+    pipe_p.add_argument('--middleware', action='append', default=None,
+                        help='中间件脚本路径（可重复，按序执行）')
     pipe_p.add_argument('-f', '--force', action='store_true', default=None,
                         help='忽略 OCR 缓存，重跑全部页')
-    pipe_p.add_argument('--engine', choices=('auto', 'swift', 'rapidocr'),
-                        default=None, help='OCR 引擎（覆盖环境变量与配置；默认按平台）')
+    pipe_p.add_argument('--ocr-fix-global', action=argparse.BooleanOptionalAction,
+                        default=None, help='启用内置通用 OCR 纠错')
+    pipe_p.add_argument('--start', type=int, default=None, help='起始页')
+    pipe_p.add_argument('--end', type=int, default=None, help='结束页')
+    _add_engine_args(pipe_p)
+    _add_split_args(pipe_p)
+    _add_detect_args(pipe_p)
     return parser
 
 
@@ -100,102 +193,103 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    project = Project(args.project)
-    config = Config(args.project)
+    cfg, cfg_base = _load_config(args.config)
 
-    if args.command == 'init':
-        project.ensure()
-        if not config.config_file.exists():
-            config.write_default()
-        config.write_env_template()
-        print(f"✓ 已初始化项目: {project.path}")
-        print(f"  请把截图或 PDF 放入 {project.get_input_dir()}/")
-        print(f"  然后运行: p2md pipeline -p {project.path}")
-        return
-
-    if not project.exists():
-        print(f"错误: 项目目录不存在: {project.path}，请先 p2md init -p {args.project}")
-        sys.exit(1)
-    project.ensure()
-
-    if args.command == 'pdftotext':
-        from . import pdfsource
-        from pathlib import Path as _Path
-        inp = config.get_assets_dir() or str(project.get_input_dir())
-        pdfs = pdfsource.find_pdfs(inp)
-        if not pdfs:
-            print(f"目录 {inp} 里没有 .pdf")
-            return
-        out_dir = _Path(args.out) if args.out else project.output_dir / "pdf_text"
-        img_dir = out_dir / "images"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        img_dir.mkdir(parents=True, exist_ok=True)
-        n_ok = n_skip = 0
-        for pdf in pdfs:
-            md = pdfsource.pdf_to_markdown(os.path.join(inp, pdf), str(img_dir), dpi=args.dpi)
-            if not md:
-                print(f"  [跳过-无文字层] {pdf}（用 pipeline 渲染 OCR）")
-                n_skip += 1
-                continue
-            out_md = out_dir / f"{os.path.splitext(pdf)[0]}.md"
-            out_md.write_text(md, encoding='utf-8')
-            n_ok += 1
-            print(f"  ✓ {pdf} → {out_md.name}")
-        print(f"\npdftotext：{n_ok} 篇成功，{n_skip} 篇无文字层")
-        return
+    images = _path_value(
+        _pick(args, cfg, 'images', ('images_dir', 'assets_dir')), cfg_base)
+    work_value = _path_value(_pick(args, cfg, 'work', ('work_dir',)), cfg_base)
 
     if args.command == 'ocr':
         from . import ocr as ocr_mod
-        assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
-        force = args.force if args.force is not None else config.get_force()
+        images = _require(images, 'images')
+        work = _resolve_work(work_value, images)
         img_for_ocr, _start, _end = ocr_mod.run(
-            project, assets, start=args.start or config.get_start_page(),
-            end=args.end or config.get_end_page(), force=force,
-            engine=args.engine)
+            images, str(work),
+            start=_pick(args, cfg, 'start', ('start', 'start_page')),
+            end=_pick(args, cfg, 'end', ('end', 'end_page')),
+            force=_pick(args, cfg, 'force', ('force',), defaults.FORCE),
+            engine=_pick(args, cfg, 'engine', ('engine',), defaults.ENGINE),
+            split_long_image_max_ratio=_pick(
+                args, cfg, 'split_long_image_max_ratio',
+                ('split_long_image_max_ratio',), defaults.SPLIT_LONG_IMAGE_MAX_RATIO),
+            split_slice_max_h=_pick(args, cfg, 'split_slice_max_h',
+                                    ('split_slice_max_h',), defaults.SPLIT_SLICE_MAX_H),
+            split_slice_min_h=_pick(args, cfg, 'split_slice_min_h',
+                                    ('split_slice_min_h',), defaults.SPLIT_SLICE_MIN_H),
+            split_slice_ratio=_pick(args, cfg, 'split_slice_ratio',
+                                    ('split_slice_ratio',), defaults.SPLIT_SLICE_RATIO))
         print(f"OCR 完成。detect 将使用预处理图目录: {img_for_ocr}")
-        _print_summary(project)
+        _print_summary(work)
         return
 
     if args.command == 'detect':
         from . import detect as detect_mod
-        from .middleware import run_all as run_ocr_hooks
-        run_ocr_hooks(project)
-        assets = args.assets
-        if not assets:
-            pre_tmp = project.output_dir / "_ocr_tmp"
-            assets = str(pre_tmp) if pre_tmp.is_dir() else (
-                config.get_assets_dir() or str(project.get_input_dir()))
-        detect_mod.detect(project, assets, pages=args.pages or None)
-        _print_summary(project)
+        work = _resolve_work(work_value, images)
+        img = images or str(paths.ocr_tmp_dir(work))
+        pages = args.pages or cfg.get('pages') or None
+        detect_mod.detect(
+            str(work), img, pages=pages,
+            min_heading_ratio=_pick(args, cfg, 'min_heading_ratio',
+                                    ('min_heading_ratio',), defaults.MIN_HEADING_RATIO),
+            bold_thickness_ratio=_pick(
+                args, cfg, 'bold_thickness_ratio',
+                ('bold_thickness_ratio',), defaults.BOLD_THICKNESS_RATIO),
+            heading_plain_ratio=_pick(args, cfg, 'heading_plain_ratio',
+                                      ('heading_plain_ratio',), defaults.HEADING_PLAIN_RATIO),
+            heading_page_base=_pick(args, cfg, 'heading_page_base',
+                                    ('heading_page_base',), defaults.HEADING_PAGE_BASE),
+            bold_use_page_h=_pick(args, cfg, 'bold_use_page_h',
+                                  ('bold_use_page_h',), defaults.BOLD_USE_PAGE_H))
+        _print_summary(work)
         return
 
     if args.command == 'build':
         from . import build_md as bm
-        bm.build(project, chapters=args.chapters)
-        _print_summary(project)
+        work = _resolve_work(work_value)
+        chapters = _pick(args, cfg, 'chapters', ('chapters',), defaults.CHAPTERS)
+        bm.build(str(work), chapters=chapters)
+        _print_summary(work)
         return
 
     if args.command == 'pipeline':
-        from . import build_md as bm
-        from . import detect as detect_mod
-        from . import ocr as ocr_mod
-        from .middleware import run_all as run_ocr_hooks
-
-        assets = args.assets or config.get_assets_dir() or str(project.get_input_dir())
-        force = args.force if args.force is not None else config.get_force()
-
-        print("=" * 40, "\n① OCR\n", "=" * 40, sep='')
-        img_for_ocr, _start, _end = ocr_mod.run(
-            project, assets, force=force, engine=args.engine)
-
-        print("=" * 40, "\n② 布局分析\n", "=" * 40, sep='')
-        run_ocr_hooks(project)
-        detect_mod.detect(project, img_for_ocr)
-
-        print("=" * 40, "\n③ 组装 Markdown\n", "=" * 40, sep='')
-        bm.build(project)
-        _print_summary(project)
-        return
+        from .api import convert_images
+        images = _require(images, 'images')
+        work = _resolve_work(work_value, images)
+        out = _path_value(_pick(args, cfg, 'out', ('out_dir', 'out')), cfg_base)
+        base_dir = _path_value(_pick(args, cfg, 'base_dir', ('base_dir',)), cfg_base) \
+            or (str(cfg_base) if cfg_base else None)
+        middlewares = _middlewares(
+            _pick(args, cfg, 'middleware', ('middlewares',)), cfg_base)
+        convert_images(
+            images, work_dir=str(work), out_dir=out, base_dir=base_dir,
+            engine=_pick(args, cfg, 'engine', ('engine',), defaults.ENGINE),
+            force=_pick(args, cfg, 'force', ('force',), defaults.FORCE),
+            start=_pick(args, cfg, 'start', ('start', 'start_page')),
+            end=_pick(args, cfg, 'end', ('end', 'end_page')),
+            split_long_image_max_ratio=_pick(
+                args, cfg, 'split_long_image_max_ratio',
+                ('split_long_image_max_ratio',), defaults.SPLIT_LONG_IMAGE_MAX_RATIO),
+            split_slice_max_h=_pick(args, cfg, 'split_slice_max_h',
+                                    ('split_slice_max_h',), defaults.SPLIT_SLICE_MAX_H),
+            split_slice_min_h=_pick(args, cfg, 'split_slice_min_h',
+                                    ('split_slice_min_h',), defaults.SPLIT_SLICE_MIN_H),
+            split_slice_ratio=_pick(args, cfg, 'split_slice_ratio',
+                                    ('split_slice_ratio',), defaults.SPLIT_SLICE_RATIO),
+            min_heading_ratio=_pick(args, cfg, 'min_heading_ratio',
+                                    ('min_heading_ratio',), defaults.MIN_HEADING_RATIO),
+            bold_thickness_ratio=_pick(
+                args, cfg, 'bold_thickness_ratio',
+                ('bold_thickness_ratio',), defaults.BOLD_THICKNESS_RATIO),
+            heading_plain_ratio=_pick(args, cfg, 'heading_plain_ratio',
+                                      ('heading_plain_ratio',), defaults.HEADING_PLAIN_RATIO),
+            heading_page_base=_pick(args, cfg, 'heading_page_base',
+                                    ('heading_page_base',), defaults.HEADING_PAGE_BASE),
+            bold_use_page_h=_pick(args, cfg, 'bold_use_page_h',
+                                  ('bold_use_page_h',), defaults.BOLD_USE_PAGE_H),
+            ocr_fix_global=_pick(args, cfg, 'ocr_fix_global',
+                                 ('ocr_fix_global',), defaults.OCR_FIX_GLOBAL),
+            middlewares=middlewares, log=print)
+        _print_summary(work)
 
 
 if __name__ == '__main__':

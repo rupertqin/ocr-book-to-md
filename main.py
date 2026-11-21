@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 """
-p2md - 扫描书 / 长截图转 Markdown 的统一入口
+p2md - 图片（扫描页 / 长截图）转 Markdown 的统一入口
 
-把 `projects/<书名>/` 项目从截图或 PDF 转换为结构化章节 Markdown。
+所有参数由命令行显式传入。
 
 用法:
-    python main.py init  -p ./projects/进化心理学
-    python main.py pipeline -p ./projects/进化心理学
-    python main.py ocr / detect / build -p ./projects/进化心理学
+    python main.py pipeline --images ./assets --work ./work --out ./out
+    python main.py ocr --images ./assets --engine rapidocr --force
+    python main.py detect --work ./work
+    python main.py build --work ./work
 
     # 安装后可直接运行
-    p2md pipeline -p ./projects/进化心理学
+    p2md pipeline --images ./assets --work ./work
 """
 
 import sys

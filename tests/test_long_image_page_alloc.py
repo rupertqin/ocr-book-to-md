@@ -137,25 +137,20 @@ def _jpeg_with_content(path, size=(60, 60)):
     im.save(path, "JPEG", quality=90)
 
 
-def test_lip_rebuild_keeps_pdf_groups_and_drops_phantom(tmp_path):
+def test_lip_rebuild_drops_phantom_groups(tmp_path):
     """long_image_pages.txt 必须按当前素材重建：
 
-      - PDF 源分组（由 prepare_pdf_sources 写入、prepare_images 只透传）要保留；
-      - 素材已删除的旧分组要清掉，否则 auto_chapters 会凭空生成一个"幽灵章节"。
+    素材已删除的旧分组要清掉，否则 auto_chapters 会凭空生成一个"幽灵章节"。
     """
     assets = tmp_path / "assets"
     assets.mkdir()
+    _jpeg_with_content(assets / "a.jpg")
     out = tmp_path / "out"
-    tmp_dir = out / "_ocr_tmp"
-    tmp_dir.mkdir(parents=True)
-    for n in (1, 2, 3):                       # PDF 渲染页
-        _jpeg_with_content(tmp_dir / f"p{n}.jpg")
-    # 上一次运行残留的幽灵分组（素材已不在 assets/）
+    (out / "_ocr_tmp").mkdir(parents=True)
     O.write_long_image_pages(str(out), {"gone.png": [7, 8]})
 
-    pages = {1: "[pdf]a.pdf", 2: "[pdf]a.pdf", 3: "[pdf]b.pdf"}
-    _, new_pages = O.prepare_images(str(assets), pages, str(out), force=True)
+    _, new_pages = O.prepare_images(str(assets), {1: "a.jpg"}, str(out), force=True)
     groups = O.read_long_image_pages(str(out))
 
-    assert groups == {"a.pdf": [1, 2], "b.pdf": [3]}
-    assert set(new_pages) == {1, 2, 3}
+    assert groups == {}
+    assert set(new_pages) == {1}

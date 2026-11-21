@@ -2,7 +2,7 @@
 """图/标题/正文三分检测（迁移自 detect_figs.py）。
 
 核心思想：用字号（行高）区分"正文/标题/图内文字"，用颜色区分标题。
-OCR 坐标 JSON（<project>/output/ocr/pages_json/）→ 结构化 blocks JSON + 裁图。
+OCR 坐标 JSON（<work_dir>/ocr/pages_json/）→ 结构化 blocks JSON + 裁图。
 """
 
 import json
@@ -13,6 +13,8 @@ import sys
 
 from PIL import Image
 import numpy as np
+
+from . import defaults, paths
 
 FIG_RE = re.compile(r"^\s*图\s*[0-9]+\.[0-9]+")
 TBL_RE = re.compile(r"^\s*表\s*[0-9]+\.[0-9]+")
@@ -503,7 +505,7 @@ def _expand_regions_to_edge_text(regions, px, body_h, tol=0.8,
 def _line_centered(t, W):
     """判断一行文字是否水平居中：文字 bbox 中心接近页面水平中心，
     且行**明显窄于版心**（居中行较短；占满版心的正文宽行即使中心恰在页中
-    也不是"居中"——如 PDF/公众号正文每行 x0≈左边距、w≈0.65~0.7W 铺满版心，
+    也不是"居中"——如扫描页/公众号正文每行 x0≈左边距、w≈0.65~0.7W 铺满版心，
     其 xc 也≈0.5 会被误判，实为段首缩进/普通正文段落）。
     """
     xc = (t["x0"] + t["x1"]) / 2
@@ -524,7 +526,7 @@ def _line_bold(t, img_gray, W, H, threshold_ratio=0.078, base_h=None):
     避免与 macOS Vision 形成两套图像处理栈的重复。
 
     threshold_ratio: 相对笔画粗细（stroke_width/字号）阈值。实测常规正文 ~0.075，
-        粗体 ~0.082+，默认 0.078 可区分；可按项目用 detect.bold_thickness_ratio 调。
+        粗体 ~0.082+，默认 0.078 可区分；可通过 bold_thickness_ratio 调整。
 
     base_h: 归一化用的"字号尺度"。默认取本行高 h；当 OCR 把同一视觉行拆成多段时
         （如行尾两字被拆成独立行），各段 OCR bbox 高度不一，stroke/段高 会抖动，
@@ -571,11 +573,11 @@ def _detect_headings(px, body_h, page_w, img_rgb, img_gray, W, H,
 
     min_heading_ratio: 彩色标题（`##`）的最小行高比例。真实标题字号明显大于正文
     （如"悖论系列N"1.31+/"第X章"1.29+），正文里独立成行的诗歌/脚注行字号接近
-    正文（1.07~1.27×）。设 1.28 可过滤后者。可经 config `detect.min_heading_ratio` 调整。
+    正文（1.07~1.27×）。设 1.28 可过滤后者。可经 min_heading_ratio 调整。
 
     plain_heading_ratio: 非彩色标题的最小行高比例（默认 1.18）。正文独立成行的
     小标题/图表题字号略大但不悬殊；真正章节标题字号更突出。可经 config
-    `detect.heading_plain_ratio` 调整（长图文章标题常只比正文大 ~1.1×）。
+    `heading_plain_ratio` 调整（长图文章标题常只比正文大 ~1.1×）。
 
     粗体标题（如长图顶部"（8.24~8.30）"/"8月周总结第3期"/"11:53 ③"）：
     行高可能并不明显大于正文（1.03×），但笔画明显更粗。作为补充，粗体且短、
@@ -1519,44 +1521,33 @@ def _group_body_h_map(json_dir, img_dir, pages):
     return out
 
 
-def detect(project, img_dir, pages=None):
-    """对项目执行布局检测。
+def detect(work_dir, img_dir, pages=None,
+           min_heading_ratio=defaults.MIN_HEADING_RATIO,
+           bold_thickness_ratio=defaults.BOLD_THICKNESS_RATIO,
+           heading_plain_ratio=defaults.HEADING_PLAIN_RATIO,
+           heading_page_base=defaults.HEADING_PAGE_BASE,
+           bold_use_page_h=defaults.BOLD_USE_PAGE_H):
+    """执行布局检测。
 
     Args:
-        project: Project 实例
-        img_dir: 源图目录（通常是预处理后的 JPEG 目录，或原图目录）
+        work_dir: 中间产物根目录
+        img_dir: 源图目录（通常是预处理后的 JPEG 目录）
         pages: 仅处理指定页（调试用，默认全部）
+        min_*/bold_*/heading_*: 显式检测阈值与开关
     Returns:
         (blocks_dir, figs_dir, total_regions)
     """
-    json_dir = str(project.get_ocr_pages_json_dir())
-    blocks_dir = str(project.get_blocks_dir())
-    fig_dir = str(project.get_figs_dir())
+    work = paths.work_path(work_dir)
+    json_dir = str(paths.ocr_pages_json_dir(work))
+    blocks_dir = str(paths.blocks_dir(work))
+    fig_dir = str(paths.figs_dir(work))
 
-    # 彩色标题（`##`）最小行高比例（跨页面统一基准）：
-    # 真标题字号明显大于正文（"悖论系列N"1.31+/"第X章"1.29+），
-    # 正文里独立成行的诗歌/脚注行字号接近正文（1.07~1.27×）。设 1.28 过滤后者。
-    # 可配置 p2md.min_heading_ratio。
-    from .config import Config
-    _cfg = Config(str(project.path))
-    min_heading_ratio = float(_cfg.get_p2md('min_heading_ratio', 1.28))
-    # 加粗判定阈值（相对笔画粗细）。可配置 p2md.bold_thickness_ratio。
-    bold_thickness_ratio = float(_cfg.get_p2md('bold_thickness_ratio', 0.078))
-    # 非彩色标题最小行高比例（默认 1.18）。长图文章标题常只比正文大 ~1.1×，
-    # 需调低才能识别。可配置 p2md.heading_plain_ratio。
-    plain_heading_ratio = float(_cfg.get_p2md('heading_plain_ratio', 1.18))
-    # 标题行高基准：true(默认)=本页所属**长图组**的像素正文行高中位；false=全书归一化中位数。
-    # 长图被切成多片（同字号、切片高不同），归一化行高跨片不可比；多张不同字号长图混排时
-    # 全书基准又会被大字号图主导。按"页→长图分组"聚合同组切片的像素行高最稳。
-    page_heading_base = bool(_cfg.get_p2md('heading_page_base', True))
-    # 加粗归一化：true(默认)=除以该页所属**长图组**的像素正文中位行高；false=除以本行 OCR 高。
-    # OCR 把同一视觉行拆成多段时各段高不同，除以段高会使加粗判定不一致；
-    # 用组级字号尺度归一化则加粗 = 笔画绝对粗细/组字号，与 OCR 段高无关。
-    bold_use_page_h = bool(_cfg.get_p2md('bold_use_page_h', True))
+    plain_heading_ratio = heading_plain_ratio
+    page_heading_base = heading_page_base
 
     if not os.path.isdir(json_dir):
         raise SystemExit(f"错误：未找到 OCR 坐标目录 {json_dir}\n"
-                         f"  请先运行 OCR：python main.py ocr -p <project>")
+                         f"  请先运行 OCR（p2md ocr / convert）")
     if not os.path.isdir(img_dir):
         raise SystemExit(f"错误：未找到截图目录 {img_dir}\n"
                          f"  请用 --assets 指定正确的素材目录（或先跑 OCR）")
@@ -1584,7 +1575,7 @@ def detect(project, img_dir, pages=None):
     global_body_h = float(np.median(_hs)) if _hs else None
 
     # 清理历史遗留的临时目录
-    out_str = str(project.output_dir)
+    out_str = str(work)
     for name in os.listdir(out_str):
         p = os.path.join(out_str, name)
         if os.path.isdir(p) and name.startswith((".blocks.tmp.", ".figs.tmp.",
@@ -1592,8 +1583,8 @@ def detect(project, img_dir, pages=None):
             shutil.rmtree(p, ignore_errors=True)
             print(f"  清理历史临时目录: {p}")
 
-    blocks_tmp = os.path.join(project.output_dir, f".blocks.tmp.{os.getpid()}")
-    fig_tmp = os.path.join(project.output_dir, f".figs.tmp.{os.getpid()}")
+    blocks_tmp = os.path.join(out_str, f".blocks.tmp.{os.getpid()}")
+    fig_tmp = os.path.join(out_str, f".figs.tmp.{os.getpid()}")
     os.makedirs(blocks_tmp, exist_ok=True)
     os.makedirs(fig_tmp, exist_ok=True)
 

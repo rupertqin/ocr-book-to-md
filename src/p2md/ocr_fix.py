@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
-"""OCR 纠错内置通用层（全 project 共享）。
+"""OCR 纠错内置通用层（全库共享）。
 
 同一 OCR 框架（macOS Vision）对中文字形常出**相同**的形近字误识（如 升→开、
-结→经），这些与具体项目无关。本模块内置一套通用纠错规则，**默认对所有项目生效**，
-把 pages_json 里每行的 OCR 错字改成正确词，供 text 流（detect→blocks→md）与
-layed 流（直接读 lines）共用。
+结→经），与具体调用方无关。本模块内置一套通用纠错规则，把 pages_json 里每行的
+OCR 错字改成正确词，供后续 detect → build 流程共用。
 
-分层：
-  1) 内置通用规则（本文件 GLOBAL_*，默认全项目开启，config detect.ocr_fix_global:false 可关）
-  2) per-project 追加（config detect.ocr_fix 指向项目脚本，追加项目专属纠错）
+内置规则（本文件 GLOBAL_*）默认开启，可用 ``ocr_fix_global=False`` 关闭；
+调用方专属纠错请通过 ``middlewares`` 脚本实现。
 
 规则只做"确定的错误组合 → 正确词"的整词替换，避免无脑单字替换误伤正确文字。
 
@@ -22,12 +20,14 @@ LOG：每次修正打印 [ocr_fix] p{n} 旧文本 → 新文本，便于核对�
 import json
 import os
 
+from . import defaults, paths
+
 # ---- 内置通用规则（形近字高频错，数据驱动，可按新发现追加）----
 #
 # ⚠ 安全红线：全局默认层会作用到**所有项目**，规则必须零歧义——
 #   错误子串在任意中文语境里都不应是正确文本的一部分。
 #   例如 "上开"→"上升" 会误伤 "表面上开始"（"上"+开始）——不可入全局！
-#   有歧义的规则请放 per-project 脚本（detect.ocr_fix），由项目人工把关。
+#   有歧义的规则请放调用方 middlewares 脚本，由调用方人工把关。
 #
 # 行内词替换：错误子串 -> 正确子串。
 GLOBAL_WORD_FIXES = [
@@ -179,18 +179,16 @@ def fix_pages(ocr_dir, word_fixes, cross_line_fixes, log=print):
     return total
 
 
-def run_global_fix(project, log=print) -> int:
-    """运行内置通用 OCR 纠错（全 project）。config detect.ocr_fix_global=false 可关。
+def run_global_fix(work_dir, enabled=defaults.OCR_FIX_GLOBAL, log=print) -> int:
+    """运行内置通用 OCR 纠错。
 
     Returns:
         修正的字符/行数（0 = 未启用或未修正）。
     """
-    from .config import Config
-    cfg = Config(str(project.path))
-    enabled = cfg.get_p2md("ocr_fix_global", True)
     if not enabled:
         return 0
-    ocr_dir = str(project.get_ocr_pages_json_dir())
+    work = paths.work_path(work_dir)
+    ocr_dir = str(paths.ocr_pages_json_dir(work))
     if not os.path.isdir(ocr_dir):
         return 0
     log("  (OCR 内置通用纠错: 形近字修正 + 水印行滤除 + 长图首片状态栏滤除)")
@@ -200,7 +198,7 @@ def run_global_fix(project, log=print) -> int:
     header_pages = None
     try:
         from .ocr import read_long_image_pages
-        lip = read_long_image_pages(str(project.output_dir))
+        lip = read_long_image_pages(str(work))
         if lip:
             header_pages = {min(ps) for ps in lip.values() if ps}
     except Exception:

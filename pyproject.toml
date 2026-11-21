@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "p2md"
-version = "0.3.0"
+version = "0.5.0"
 description = "Local OCR → structured Markdown for scanned books and long screenshots (no LLM, macOS Vision / RapidOCR)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,12 +34,10 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
 build = ["build>=1.0", "twine>=5.0"]
-pdf = ["PyMuPDF>=1.23"]
 rapidocr = ["rapidocr>=3.10", "onnxruntime>=1.20"]
 
 [project.scripts]
 p2md = "p2md.cli:main"
-ocr-book-to-md = "p2md.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
