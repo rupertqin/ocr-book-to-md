@@ -875,10 +875,9 @@ def _render_pages_cross_page(blocks_dir, pages, skip_title=None, no_headings=Fal
         centered = bool(b.get("centered"))
         is_label = t.strip().endswith("：")
         _cur_item = _is_list_item(t)
-        # 段首判定：优先用 detect 的 para_start（标点+节标签文本驱动, 在长图
-        # 行距大(gap/h≈0.94)的截图上仍可靠——而旧版的 gap>=0.75h 阈值会把
-        # 每行当段首造成"每行独立段"伪断裂）。跨页/切片首行 detect 拿不到上行
-        # 上下文默认 False, 用 prev_text 句末标点补判。
+        # 段首判定：优先用 detect 的 para_start（标点+节标签文本驱动，长图行距
+        # 大(gap/h≈0.94)时也不会把每行当段首）。跨页/切片首行 detect 拿不到上行
+        # 上下文默认 False，用 prev_text 句末标点补判。
         para_start = (bool(b.get("para_start", False))
                       or is_label
                       or (prev_text.rstrip().endswith("：") and _cur_item is not None)

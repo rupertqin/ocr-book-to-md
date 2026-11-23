@@ -60,7 +60,7 @@ def test_api_passes_all_explicit_options(monkeypatch, tmp_path):
 def test_api_ignores_config_files(monkeypatch, tmp_path):
     images = tmp_path / "images"
     images.mkdir()
-    (tmp_path / "config.yaml").write_text("p2md:\n  engine: tesseract\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("engine: tesseract\n", encoding="utf-8")
     (tmp_path / ".env").write_text("P2MD_ENGINE=tesseract\n", encoding="utf-8")
     seen = {}
 
@@ -92,12 +92,11 @@ def test_api_rejects_missing_images(tmp_path):
 def test_config_file_loader_aliases_and_base(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(
-        "p2md:\n"
-        "  assets_dir: assets\n"
-        "  work: work\n"
-        "  output: final\n"
-        "  start_page: 3\n"
-        "  engine: rapidocr\n",
+        "assets_dir: assets\n"
+        "work: work\n"
+        "output: final\n"
+        "start_page: 3\n"
+        "engine: rapidocr\n",
         encoding="utf-8",
     )
     values, base = config_file.load_config(str(path))
@@ -109,22 +108,19 @@ def test_config_file_loader_aliases_and_base(tmp_path):
     assert base == tmp_path
 
 
-def test_config_file_reads_project_sections_without_wrapper(tmp_path):
-    """项目配置的分节写法（book / detect）不带 p2md: 也能读。"""
+def test_config_file_flat_keys(tmp_path):
+    """配置文件是扁平键值表：与命令行同名，只有路径类键映射到内部参数名。"""
     path = tmp_path / "config.yaml"
     path.write_text(
         "assets_dir: assets\n"
         "work: output\n"
-        "book:\n"
-        "  name: 某书\n"
-        "  start_page: 5\n"
-        "  end_page: 20\n"
-        "  force_ocr: true\n"
-        "  type: image\n"
-        "  unknown_book_key: 1\n"
-        "detect:\n"
-        "  min_heading_ratio: 1.05\n"
-        "  middlewares: [hooks/a.py]\n"
+        "output: out\n"
+        "start_page: 5\n"
+        "end_page: 20\n"
+        "force: true\n"
+        "type: image\n"
+        "min_heading_ratio: 1.05\n"
+        "middlewares: [hooks/a.py]\n"
         "page_margin: 1cm\n",
         encoding="utf-8",
     )
@@ -136,23 +132,31 @@ def test_config_file_reads_project_sections_without_wrapper(tmp_path):
     assert values["force"] is True
     assert values["min_heading_ratio"] == 1.05
     assert values["middlewares"] == ["hooks/a.py"]
+    assert values["out_dir"] == "out"
     assert values["page_margin"] == "1cm"
     assert values["type"] == "image"
     assert base == tmp_path
 
 
-def test_config_file_type_legacy_aliases(tmp_path):
-    """旧写法 text / raw / img 归一化为 normal / image。"""
-    for raw, expected in (("text", "normal"), ("raw", "image"), ("img", "image")):
-        path = tmp_path / f"{raw}.yaml"
-        path.write_text(f"book:\n  type: {raw}\n", encoding="utf-8")
+def test_config_file_rejects_nested_sections(tmp_path):
+    """不再接受分节写法：book / detect 一律当未知键报错。"""
+    path = tmp_path / "config.yaml"
+    path.write_text("book:\n  type: image\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="未知配置键: book"):
+        config_file.load_config(str(path))
+
+
+def test_config_file_accepts_each_type(tmp_path):
+    for value in ("normal", "layed", "image"):
+        path = tmp_path / f"{value}.yaml"
+        path.write_text(f"type: {value}\n", encoding="utf-8")
         values, _base = config_file.load_config(str(path))
-        assert values["type"] == expected
+        assert values["type"] == value
 
 
 def test_config_file_rejects_unknown_type(tmp_path):
     path = tmp_path / "config.yaml"
-    path.write_text("book:\n  type: png\n", encoding="utf-8")
+    path.write_text("type: png\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="未知还原方式"):
         config_file.load_config(str(path))
 

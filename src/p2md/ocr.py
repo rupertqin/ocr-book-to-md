@@ -640,10 +640,9 @@ def read_long_image_pages(out):
                 line = line.rstrip("\n")
                 if not line:
                     continue
-                if "\t" in line:
-                    name, pages = line.split("\t", 1)
-                else:
-                    name, pages = line, line  # 兼容旧格式（一行全是页号）
+                if "\t" not in line:
+                    continue
+                name, pages = line.split("\t", 1)
                 nums = [int(x) for x in pages.replace(",", " ").split() if x.strip()]
                 if nums:
                     result[name] = sorted(set(nums))

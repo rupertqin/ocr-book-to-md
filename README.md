@@ -75,47 +75,19 @@ CLI 支持显式传入配置文件：
 p2md --config ./config.yaml
 ```
 
-配置文件为 YAML 或 JSON，命令行参数优先于配置文件。配置文件中的相对路径按**配置文件所在目录**解析；未知的顶层键会直接报错。
+配置文件是 YAML 或 JSON 的扁平键值表，键名与命令行参数同名；命令行参数优先。
+文件里的相对路径按**配置文件所在目录**解析，未知键直接报错。
 
 ```yaml
-engine: auto
 assets_dir: assets
-work: work
+work: output
 output: out
-start_page: null
-end_page: null
-force: false
-min_heading_ratio: 1.28
-bold_thickness_ratio: 0.078
+type: layed
+page_margin: 1cm 1.5cm
+bold_thickness_ratio: 0.082
 middlewares:
 - hooks/clean_ocr.py
-- hooks/fix_ocr.py
 ```
-
-- `work`：唯一中间产物临时目录。
-- `output`：最终交付目录，保存 Markdown 与 `images/`。
-- `start_page` / `end_page`：等价于 `--start` / `--end`。
-
-项目内的 `config.yaml` 可以直接复用，不需要再套一层 `p2md:`。`book` / `detect` 分节里 p2md 认识的键会被读取，分节内其它键静默忽略：
-
-```yaml
-assets_dir: assets        # 顶层键与命令行同名
-work: output
-book:
-  start_page: 1           # → start
-  end_page: null          # → end
-  force_ocr: false        # → force
-  type: image             # Markdown 还原方式 normal / layed / image
-detect:
-  min_heading_ratio: 1.28
-  middlewares: [hooks/clean_ocr.py]
-page_margin: 1cm 1.5cm    # layed / image 的排版参数（顶层键）
-font_family: Hiragino Sans GB
-```
-
-合并优先级：分节 < 顶层键 < `p2md:` 段（`p2md:` 仅为向后兼容保留）。
-
-可用键：
 
 | 键 | 说明 |
 |---|---|
@@ -131,8 +103,9 @@ font_family: Hiragino Sans GB
 | `middlewares` | OCR 后执行的脚本列表 |
 | `chapters` | 人工章节结构 JSON 文件 |
 | `base_dir` | 中间件脚本相对路径基准 |
-| `type` | Markdown 还原方式，`normal` / `layed` / `image`（旧写法 `text`→`normal`、`raw`/`img`→`image`） |
-| `page_margin` / `font_family` / `justify` / `width_scale` / `letter_spacing` / `punct_compress` / `layed_font_ratio` / `layed_min_font_pt` | layed 的排版参数 |
+| `type` | Markdown 还原方式，`normal` / `layed` / `image` |
+| `pages` | 只处理指定页（`layed` / `image`） |
+| `page_margin` / `font_family` / `justify` / `width_scale` / `letter_spacing` / `punct_compress` / `layed_font_ratio` / `layed_min_font_pt` | `layed` 的排版参数 |
 
 ## Python API
 
