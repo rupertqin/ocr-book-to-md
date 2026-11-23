@@ -2,7 +2,7 @@
 
 **图片（扫描页 / 长截图）→ 结构化 Markdown。纯本地、无 LLM、确定性输出。**
 
-`p2md` 是通用基础库与 CLI：把一组图片转换成章节 Markdown，识别正文段落、标题、插图与表格，裁出图片并生成 `images/...` 引用。**最终产物是 Markdown 和裁图**。
+`p2md` 是通用基础库与 CLI：把一组图片还原成章节 Markdown，识别正文段落、标题、插图与表格，裁出图片并生成 `images/...` 引用。**最终产物是 Markdown 和裁图**。
 
 ```
 输入：   ./assets/p3.png ... p692.png
@@ -67,6 +67,7 @@ p2md pipeline --image ./one.png --work ./work --out ./output
 p2md ocr      --images ./assets --work ./work
 p2md detect   --work ./work
 p2md build    --work ./work --chapters ./chapters.json   # 可选人工章节
+p2md build    --work ./work --type layed                 # 版式还原（见 `还原方式`）
 ```
 
 ## 配置文件
@@ -77,7 +78,7 @@ CLI 支持显式传入配置文件：
 p2md pipeline --config ./config.yaml
 ```
 
-配置文件为 YAML 或 JSON，命令行参数优先于配置文件。配置文件中的相对路径按**配置文件所在目录**解析；未知键会直接报错。
+配置文件为 YAML 或 JSON，命令行参数优先于配置文件。配置文件中的相对路径按**配置文件所在目录**解析；未知的顶层键会直接报错。
 
 ```yaml
 engine: auto
@@ -98,6 +99,25 @@ middlewares:
 - `output`：最终交付目录，保存 Markdown 与 `images/`。
 - `start_page` / `end_page`：等价于 `--start` / `--end`。
 
+项目内的 `config.yaml` 可以直接复用，不需要再套一层 `p2md:`。`book` / `detect` 分节里 p2md 认识的键会被读取，分节内其它键静默忽略：
+
+```yaml
+assets_dir: assets        # 顶层键与命令行同名
+work: output
+book:
+  start_page: 1           # → start
+  end_page: null          # → end
+  force_ocr: false        # → force
+  type: image             # Markdown 还原方式 normal / layed / image
+detect:
+  min_heading_ratio: 1.28
+  middlewares: [hooks/clean_ocr.py]
+page_margin: 1cm 1.5cm    # layed / image 的排版参数（顶层键）
+font_family: Hiragino Sans GB
+```
+
+合并优先级：分节 < 顶层键 < `p2md:` 段（`p2md:` 仅为向后兼容保留）。
+
 可用键：
 
 | 键 | 说明 |
@@ -114,6 +134,8 @@ middlewares:
 | `middlewares` | OCR 后执行的脚本列表 |
 | `chapters` | 人工章节结构 JSON 文件 |
 | `base_dir` | 中间件脚本相对路径基准 |
+| `type` | Markdown 还原方式，`normal` / `layed` / `image`（旧写法 `text`→`normal`、`raw`/`img`→`image`） |
+| `page_margin` / `font_family` / `justify` / `width_scale` / `letter_spacing` / `punct_compress` / `layed_font_ratio` / `layed_min_font_pt` | layed 的排版参数 |
 
 ## Python API
 
@@ -133,6 +155,7 @@ print(result.pages, len(result.markdowns))
 result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 ```
 
+- `type` 是 Markdown 还原方式：`normal`（默认）/ `layed` / `image`；`layed` / `image` 的产物目录是 `<work>/content_layed/`、`<work>/content_image/`。
 - `convert_images(...)` 与 `convert(...)` 参数相同；返回 `ConvertResult(markdowns, images, pages, work_root, warnings)`。
 - `convert_image(...)` 是单图入口；直接传图片文件路径，页号固定为 1。
 - 失败抛 `ConvertError`（底层 `SystemExit` 已统一转换）。
@@ -147,14 +170,12 @@ result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 ├── blocks/               # 每页 blocks JSON
 ├── figs/                 # 裁出的插图/表格
 ├── md/                   # 章节 Markdown（便于复核）
-└── content/              # build 原始产物，复制到 output
-
-<output>/
-├── article_0.md ...
-└── images/               # 裁图，article 内引用 images/xxx.png
+├── content/              # type=text（默认）：build 原始产物
+├── content_layed/        # type=layed：版式还原
+└── content_image/        # type=image：每页原图
 ```
 
-传 `--out` / `out_dir` 时，`<work>/content/` 下的 Markdown 与 `images/` 会复制到 `<output>`。
+传 `--out` / `out_dir` 时，对应 `content[_type]/` 下的 Markdown 与 `images/` 会复制到 `<output>`。
 
 ## CLI 参数
 
@@ -192,8 +213,10 @@ result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `--work` | `<cwd>/.derived/ocr` | 中间产物目录 |
-| `--chapters` | 自动分章 | 人工章节结构 JSON 路径 |
-| `--out` | `None` | 最终交付目录；不传只写 `<work>/content` |
+| `--chapters` | 自动分章 | 人工章节结构 JSON 路径（仅 `--type normal`） |
+| `--out` | `None` | 最终交付目录；不传只写 `<work>/content[_type]` |
+| `--type` | `normal` | 还原方式：`normal` / `layed` / `image`（见下） |
+| `--pages` / `--page-margin` / `--font-family` / `--assets` | — | layed / image 的排版与页图参数 |
 
 ### `p2md pipeline`
 
@@ -209,6 +232,29 @@ result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 | `--ocr-fix-global` / `--no-ocr-fix-global` | `true` | 启用内置通用 OCR 纠错 |
 | `--start` / `--end` | 自动探测 | OCR 页码范围 |
 
+### 还原方式（`--type`）
+
+`build` 与 `pipeline` 都用 `--type` 选择 Markdown 的还原方式：
+
+| `type` | 内容目录 | 组织方式 |
+|---|---|---|
+| `normal`（默认） | `<work>/content/` | 纯文本流：识别出的标题/正文/图重新排版 |
+| `layed` | `<work>/content_layed/` | 版式还原：按 OCR 坐标绝对定位文字 + 裁图，每页一个 `<section class="layed-page">` |
+| `image` | `<work>/content_image/` | 纯图片，不做 OCR：每页原图一页，一个 `<section class="img-page">` |
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--type` | `normal` | `normal` / `layed` / `image` |
+| `--pages` | 全部页 | 仅处理指定页（layed / image，调试） |
+| `--page-margin` | `1cm 1.5cm` | 页面边距，CSS margin 简写（layed / image） |
+| `--font-family` | 无 | 正文字体族（layed） |
+| `--width-scale` / `--letter-spacing` / `--justify` | 1.0 / 无 / 开 | layed 的文字排版微调 |
+| `--assets` | `<work>/_ocr_tmp` | 页图目录（image） |
+
+产物：`<work>/content_<type>/article_N.md`（`normal` 用 `<work>/content/`），给了 `--out` 时同步到交付目录。
+`layed` 全书统一缩放（取常规页里最大的一页），字号跨页一致，超高页按文字行间隙切窗口；
+`image` 有 blocks 时按章节分篇并跳过前言，没有 blocks（未跑 OCR）时全书一篇。
+
 ## Python API 参数
 
 ```python
@@ -219,7 +265,11 @@ p2md.convert(
     split_slice_max_h=2600, split_slice_min_h=1400, split_slice_ratio=3.0,
     min_heading_ratio=1.28, bold_thickness_ratio=0.078,
     heading_plain_ratio=1.18, heading_page_base=True, bold_use_page_h=True,
-    ocr_fix_global=True, middlewares=None, chapters=None, log=None,
+    ocr_fix_global=True, middlewares=None, chapters=None,
+    type="normal", pages=None, page_margin="1cm 1.5cm",
+    font_family=None, justify=True, width_scale=1.0, letter_spacing=None,
+    punct_compress=None, font_height_ratio=0.78, min_font_pt=6.0,
+    assets_dir=None, log=None,
 )
 ```
 

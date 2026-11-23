@@ -89,16 +89,36 @@ def _collect_result(work: Path, article_dir: Path, out_dir=None,
     return result
 
 
-def build_stage(work_dir, out_dir=None, chapters=None,
+def build_stage(work_dir, out_dir=None, chapters=None, type=defaults.MD_TYPE,
+                pages=None, page_margin=defaults.PAGE_MARGIN, font_family=None,
+                justify=defaults.LAYED_JUSTIFY,
+                width_scale=defaults.LAYED_WIDTH_SCALE,
+                letter_spacing=None, punct_compress=None,
+                font_height_ratio=defaults.LAYED_FONT_HEIGHT_RATIO,
+                min_font_pt=defaults.LAYED_MIN_FONT_PT,
+                assets_dir=None,
                 log: Optional[Callable[[str], None]] = None) -> ConvertResult:
-    """从已有 work 目录组装章节 Markdown，可选复制到最终 output 目录。"""
-    from . import build_md
+    """从已有 work 目录组装 Markdown（normal / layed / image），可选复制到 output。
+
+    ``normal`` 走 build_md（可配人工 ``chapters``）；``layed`` / ``image`` 由
+    :mod:`p2md.restore` 生成，章节切分自动（``chapters`` 不生效）。
+    """
+    from . import build_md, restore
 
     say = log or _noop
     work = _resolve_dir(work_dir, "work")
-    article = paths.article_dir(work)
-    say("[build] 组装章节")
-    _call("build", build_md.build, str(work), chapters)
+    if type == "normal":
+        say("[build] 组装章节")
+        _call("build", build_md.build, str(work), chapters)
+        article = paths.content_dir(work)
+    else:
+        say(f"[build] 组装 {type} Markdown")
+        article = _call(
+            "build", restore.organize, str(work), type=type, pages=pages,
+            page_margin=page_margin, font_family=font_family, justify=justify,
+            width_scale=width_scale, letter_spacing=letter_spacing,
+            punct_compress=punct_compress, font_height_ratio=font_height_ratio,
+            min_font_pt=min_font_pt, assets_dir=assets_dir)[1]
     pages_json = paths.ocr_pages_json_dir(work)
     result = _collect_result(work, article, out_dir, say)
     result.pages = len(list(pages_json.glob("*.json"))) if pages_json.is_dir() else 0
@@ -127,6 +147,17 @@ def convert_images(
     ocr_fix_global: bool = defaults.OCR_FIX_GLOBAL,
     middlewares: list | None = defaults.MIDDLEWARES,
     chapters=None,
+    type: str = defaults.MD_TYPE,
+    pages=None,
+    page_margin: str = defaults.PAGE_MARGIN,
+    font_family: str | None = None,
+    justify: bool = defaults.LAYED_JUSTIFY,
+    width_scale: float = defaults.LAYED_WIDTH_SCALE,
+    letter_spacing: str | None = None,
+    punct_compress=None,
+    font_height_ratio: float = defaults.LAYED_FONT_HEIGHT_RATIO,
+    min_font_pt: float = defaults.LAYED_MIN_FONT_PT,
+    assets_dir: str | None = None,
     log: Optional[Callable[[str], None]] = None,
 ) -> ConvertResult:
     """把一组图片转成章节 Markdown。
@@ -144,7 +175,11 @@ def convert_images(
         heading_page_base/bold_use_page_h: 版面检测阈值与开关。
         ocr_fix_global: 是否启用内置通用 OCR 纠错。
         middlewares: OCR 后执行的脚本列表（相对路径按 ``base_dir`` 解析）。
-        chapters: 人工章节结构（透传 build）。
+        chapters: 人工章节结构（透传 build，仅 ``type=text``）。
+        type: Markdown 还原方式：``normal``（默认）/ ``layed`` / ``image``。
+        page_margin/font_family/justify/width_scale/letter_spacing/
+        punct_compress/font_height_ratio/min_font_pt: layed 的排版参数。
+        assets_dir: image 的页面图片目录，默认 ``<work>/_ocr_tmp``。
         log: 日志回调，默认静默。
 
     Returns:
@@ -188,7 +223,12 @@ def convert_images(
           heading_page_base=heading_page_base,
           bold_use_page_h=bold_use_page_h)
 
-    result = build_stage(str(work), out_dir=out_dir, chapters=chapters, log=say)
+    result = build_stage(
+        str(work), out_dir=out_dir, chapters=chapters, type=type, pages=pages,
+        page_margin=page_margin, font_family=font_family, justify=justify,
+        width_scale=width_scale, letter_spacing=letter_spacing,
+        punct_compress=punct_compress, font_height_ratio=font_height_ratio,
+        min_font_pt=min_font_pt, assets_dir=assets_dir, log=say)
 
     pages_json = paths.ocr_pages_json_dir(work)
     result.pages = len(list(pages_json.glob("*.json"))) if pages_json.is_dir() else 0

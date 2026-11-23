@@ -109,6 +109,54 @@ def test_config_file_loader_aliases_and_base(tmp_path):
     assert base == tmp_path
 
 
+def test_config_file_reads_project_sections_without_wrapper(tmp_path):
+    """项目配置的分节写法（book / detect）不带 p2md: 也能读。"""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "assets_dir: assets\n"
+        "work: output\n"
+        "book:\n"
+        "  name: 某书\n"
+        "  start_page: 5\n"
+        "  end_page: 20\n"
+        "  force_ocr: true\n"
+        "  type: image\n"
+        "  unknown_book_key: 1\n"
+        "detect:\n"
+        "  min_heading_ratio: 1.05\n"
+        "  middlewares: [hooks/a.py]\n"
+        "page_margin: 1cm\n",
+        encoding="utf-8",
+    )
+    values, base = config_file.load_config(str(path))
+    assert values["images_dir"] == "assets"
+    assert values["work_dir"] == "output"
+    assert values["start"] == 5
+    assert values["end"] == 20
+    assert values["force"] is True
+    assert values["min_heading_ratio"] == 1.05
+    assert values["middlewares"] == ["hooks/a.py"]
+    assert values["page_margin"] == "1cm"
+    assert values["type"] == "image"
+    assert base == tmp_path
+
+
+def test_config_file_type_legacy_aliases(tmp_path):
+    """旧写法 text / raw / img 归一化为 normal / image。"""
+    for raw, expected in (("text", "normal"), ("raw", "image"), ("img", "image")):
+        path = tmp_path / f"{raw}.yaml"
+        path.write_text(f"book:\n  type: {raw}\n", encoding="utf-8")
+        values, _base = config_file.load_config(str(path))
+        assert values["type"] == expected
+
+
+def test_config_file_rejects_unknown_type(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("book:\n  type: png\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="未知还原方式"):
+        config_file.load_config(str(path))
+
+
 def test_cli_config_applies_and_flags_override(monkeypatch, tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(

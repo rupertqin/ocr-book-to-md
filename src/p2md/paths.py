@@ -59,3 +59,13 @@ def article_dir(work_dir: str | Path) -> Path:
 
 def images_dir(work_dir: str | Path) -> Path:
     return content_dir(work_dir) / "images"
+
+
+def content_dir_for(work_dir: str | Path, md_type: str) -> Path:
+    """某种还原方式（type）的 Markdown 目录。
+
+    ``normal`` 直接用 build 的 ``content/``；``layed`` / ``image`` 各写独立目录
+    ``content_<type>/``，避免三种方式互相覆盖。
+    """
+    base = work_path(work_dir)
+    return base / "content" if md_type == "normal" else base / f"content_{md_type}"

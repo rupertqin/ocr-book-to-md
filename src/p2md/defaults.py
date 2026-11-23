@@ -22,3 +22,13 @@ START = None
 END = None
 MIDDLEWARES = None
 CHAPTERS = None
+
+# Markdown 还原方式：normal（纯文本流，默认）/ layed（版式还原）/ image（图片流，不做 OCR）
+MD_TYPE = "normal"
+PAGE_MARGIN = "1cm 1.5cm"
+
+# layed 的文字排版
+LAYED_FONT_HEIGHT_RATIO = 0.78
+LAYED_MIN_FONT_PT = 6.0
+LAYED_JUSTIFY = True
+LAYED_WIDTH_SCALE = 1.0
