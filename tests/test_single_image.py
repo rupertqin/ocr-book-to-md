@@ -41,7 +41,7 @@ def test_cli_accepts_single_image(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "convert_images", fake_convert)
     monkeypatch.setattr(
         sys, "argv",
-        ["p2md", "pipeline", "--image", str(image),
+        ["p2md", "--image", str(image),
          "--work", str(tmp_path / "work"), "--out", str(tmp_path / "output")])
     cli.main()
     assert captured["images"] == str(image.resolve())

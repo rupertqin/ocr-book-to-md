@@ -67,3 +67,22 @@ def test_direct_supports_glob(monkeypatch, tmp_path, capsys):
     assert "# 01" in out
     assert "# 02" in out
     assert len(calls) == 2
+
+
+def test_direct_positional_dir_runs_book_pipeline(monkeypatch, tmp_path):
+    """无子命令 + 目录 = 整本管线（convert_images），不是逐张。"""
+    assets = tmp_path / "book"
+    assets.mkdir()
+    _make_image(assets / "01.jpg", "01")
+    captured = {}
+
+    def fake_convert(images_dir, **kwargs):
+        captured["images"] = images_dir
+        captured.update(kwargs)
+
+    monkeypatch.setattr(api, "convert_images", fake_convert)
+    monkeypatch.setattr(
+        sys, "argv", ["p2md", str(assets), "--out", str(tmp_path / "out")])
+    cli.main()
+    assert captured["images"] == str(assets)
+    assert captured["out_dir"] == str(tmp_path / "out")

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""p2md CLI：ocr / detect / build / pipeline。
+"""p2md CLI：默认全流程；ocr / detect / build 是其分解步骤。
 
 接受图片输入，产出 Markdown 与裁图。参数来自命令行与显式 ``--config`` 文件，
 命令行参数优先。
@@ -116,7 +116,7 @@ def _argv_with_direct(argv):
     """把无子命令调用转成内部 _direct 子命令。"""
     if not argv or argv[0] in ('-h', '--help', '--version'):
         return argv
-    if argv[0] in ('ocr', 'detect', 'build', 'pipeline', '_direct'):
+    if argv[0] in ('ocr', 'detect', 'build', '_direct'):
         return argv
     return ['_direct', *argv]
 
@@ -218,27 +218,26 @@ def _parser() -> argparse.ArgumentParser:
         description='p2md - 图片（扫描页 / 长截图）转 Markdown（OCR → 版面分析 → 章节 Markdown）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-命令:
+默认（不带子命令）就是全流程：ocr → middleware → detect → build。
+下面三个子命令是它的分解步骤，用于单独重跑某一阶段:
+
   ocr         OCR → <work>/ocr/
   detect      版面分析 → <work>/blocks + <work>/figs
   build       组装 Markdown → <work>/content（--type normal / layed / image）
-  pipeline    全流程：ocr → middleware → detect → build
 
 示例:
-  p2md ./book/*.jpg                 # 直接转换并打印 Markdown
-  p2md -o ./book/*.jpg              # 在图片旁写出同名 .md
-  p2md pipeline --config ./config.yaml
-  p2md pipeline --images ./assets --work ./work --out ./output
+  p2md --config ./config.yaml        # 全流程（默认模式）
+  p2md ./assets --out ./output       # 目录 = 一本书，逐章输出
+  p2md ./book/*.jpg                  # 逐张转换并打印 Markdown
+  p2md -o ./book/*.jpg               # 在图片旁写出同名 .md
   p2md ocr --images ./assets --engine rapidocr --force
-  p2md build --work ./work
   p2md build --work ./work --type layed
-  p2md build --work ./work --type image --assets ./scans
         """
     )
     parser.add_argument('--version', action='version', version=f'p2md {__version__}')
     sub = parser.add_subparsers(
         dest='command', help='可用命令',
-        metavar='{ocr,detect,build,pipeline}')
+        metavar='{ocr,detect,build}')
 
     ocr_p = sub.add_parser('ocr', help='OCR 步骤')
     _add_config_arg(ocr_p)
@@ -269,7 +268,12 @@ def _parser() -> argparse.ArgumentParser:
     # 无子命令时由 main() 自动插入，支持 p2md IMAGE... / p2md -o IMAGE...
     dir_p = sub.add_parser('_direct', help=argparse.SUPPRESS)
     _add_config_arg(dir_p)
-    dir_p.add_argument('images', nargs='*', help='图片文件、目录或通配符')
+    dir_p.add_argument('images', nargs='*',
+                       help='图片文件、目录或通配符（目录/通配=整本；文件=逐张）')
+    dir_p.add_argument('--images', dest='images_opt', default=None,
+                       help='输入图片目录或单张图片（按整本书处理）')
+    dir_p.add_argument('--image', dest='images_opt', default=None,
+                       help='单张图片文件（同 --images 传文件）')
     dir_p.add_argument('-o', '--write', action='store_true',
                        help='把 Markdown 写到源图片旁（覆盖同名 .md）')
     dir_p.add_argument('--work', default=None, help='中间产物根目录')
@@ -283,30 +287,21 @@ def _parser() -> argparse.ArgumentParser:
     dir_p.add_argument('--start', type=int, default=None, help='起始页')
     dir_p.add_argument('--end', type=int, default=None, help='结束页')
     dir_p.add_argument('--chapters', default=None, help='人工章节结构 JSON 文件')
+    dir_p.add_argument('--type', choices=['normal', 'layed', 'image'], default=None,
+                       help='Markdown 还原方式：normal 纯文本流 / layed 版式还原 / '
+                            'image 纯图片（默认 normal）')
+    dir_p.add_argument('--page-margin', default=None,
+                       help='页面边距，CSS margin 简写（layed / image，默认 1cm 1.5cm）')
+    dir_p.add_argument('--font-family', default=None, help='正文字体族（layed）')
+    dir_p.add_argument('--justify', action=argparse.BooleanOptionalAction,
+                       default=None, help='正文两端对齐（layed，默认开）')
+    dir_p.add_argument('--width-scale', type=float, default=None,
+                       help='文字容器宽度系数（layed，默认 1.0）')
+    dir_p.add_argument('--letter-spacing', default=None,
+                       help='正文统一字距（layed），如 0.02em')
     _add_engine_args(dir_p)
     _add_split_args(dir_p)
     _add_detect_args(dir_p)
-
-    pipe_p = sub.add_parser('pipeline', help='全流程')
-    _add_config_arg(pipe_p)
-    pipe_p.add_argument('--images', default=None, help='输入图片目录或单张图片')
-    pipe_p.add_argument('--image', dest='images', default=None,
-                        help='单张图片文件（等价于 --images 传文件）')
-    pipe_p.add_argument('--work', default=None, help='中间产物目录')
-    pipe_p.add_argument('--out', default=None, help='最终交付目录')
-    pipe_p.add_argument('--base-dir', default=None, help='中间件脚本相对路径基准')
-    pipe_p.add_argument('--middleware', action='append', default=None,
-                        help='中间件脚本路径（可重复，按序执行）')
-    _add_force_arg(pipe_p)
-    pipe_p.add_argument('--ocr-fix-global', action=argparse.BooleanOptionalAction,
-                        default=None, help='启用内置通用 OCR 纠错')
-    pipe_p.add_argument('--start', type=int, default=None, help='起始页')
-    pipe_p.add_argument('--end', type=int, default=None, help='结束页')
-    pipe_p.add_argument('--chapters', default=None, help='人工章节结构 JSON 文件')
-    _add_engine_args(pipe_p)
-    _add_split_args(pipe_p)
-    _add_detect_args(pipe_p)
-    _add_type_args(pipe_p)
 
     sub._choices_actions = [
         action for action in sub._choices_actions
@@ -330,18 +325,31 @@ def main() -> None:
         out_value = _path_value(_pick(args, cfg, 'out', ('out_dir',)), cfg_base)
 
         if args.command == '_direct':
-            from .api import convert_image
+            from .api import convert_image, convert_images
 
-            if args.images:
-                raw_images, image_base = args.images, None
-            else:
-                raw_images = cfg.get('images_dir') or []
-                image_base = cfg_base
+            if args.images_opt and args.images:
+                raise SystemExit(
+                    "错误：位置参数（如 p2md ./assets）与 --images 只能用一个")
+            raw_images = args.images_opt or args.images or cfg.get('images_dir') or []
             if isinstance(raw_images, str):
                 raw_images = [raw_images]
-            images = _expand_images(raw_images, image_base)
-            if not images:
-                raise SystemExit("错误：没有匹配的图片文件")
+
+            # 默认模式 = 全流程：一个目录（或 config 的 assets_dir）当一本书；
+            # 显式文件/通配符、或 -o（写同名 .md）走逐张模式。
+            book_source = None
+            if not args.write:
+                if args.images_opt:
+                    book_source = _path_value(raw_images if isinstance(raw_images, str)
+                                              else raw_images[0], cfg_base)
+                elif args.images:
+                    if len(raw_images) == 1:
+                        candidate = Path(str(raw_images[0])).expanduser()
+                        if not candidate.is_absolute() and cfg_base:
+                            candidate = cfg_base / candidate
+                        if candidate.is_dir():
+                            book_source = candidate
+                elif raw_images:
+                    book_source = _path_value(raw_images[0], cfg_base)
 
             raw_chapters = args.chapters if args.chapters is not None else cfg.get('chapters')
             chapters = _load_chapters(
@@ -380,8 +388,39 @@ def main() -> None:
                     _pick(args, cfg, 'middleware', ('middlewares',)), cfg_base),
                 chapters=chapters,
                 base_dir=base_dir,
-                log=lambda _msg: None,
             )
+            restore_opts = dict(
+                type=_pick(args, cfg, 'type', ('type',), defaults.MD_TYPE),
+                page_margin=_pick(args, cfg, 'page_margin', ('page_margin',),
+                                  defaults.PAGE_MARGIN),
+                font_family=_pick(args, cfg, 'font_family', ('font_family',)),
+                justify=_pick(args, cfg, 'justify', ('justify',),
+                              defaults.LAYED_JUSTIFY),
+                width_scale=_pick(args, cfg, 'width_scale', ('width_scale',),
+                                  defaults.LAYED_WIDTH_SCALE),
+                letter_spacing=_pick(args, cfg, 'letter_spacing',
+                                     ('letter_spacing',)),
+                punct_compress=_pick(args, cfg, 'punct_compress', ('punct_compress',)),
+                font_height_ratio=_pick(
+                    args, cfg, 'layed_font_ratio', ('layed_font_ratio',),
+                    defaults.LAYED_FONT_HEIGHT_RATIO),
+                min_font_pt=_pick(args, cfg, 'layed_min_font_pt',
+                                  ('layed_min_font_pt',), defaults.LAYED_MIN_FONT_PT),
+            )
+
+            if book_source is not None:
+                work = _resolve_work(work_value, book_source)
+                convert_images(
+                    str(book_source), work_dir=str(work), out_dir=out_value,
+                    assets_dir=str(book_source), log=print,
+                    **options, **restore_opts)
+                _print_summary(work, restore_opts['type'])
+                return
+
+            images = _expand_images(raw_images, cfg_base)
+            if not images:
+                raise SystemExit("错误：没有匹配的图片文件")
+            options['log'] = lambda _msg: None
             write_out = bool(args.write or out_value)
             for index, image in enumerate(images, 1):
                 with contextlib.ExitStack() as stack:
@@ -482,71 +521,6 @@ def main() -> None:
                                   defaults.LAYED_MIN_FONT_PT),
                 assets_dir=_path_value(
                     _pick(args, cfg, 'assets_dir', ('assets_dir',)), cfg_base))
-            _print_summary(work, _pick(args, cfg, 'type', ('type',),
-                                       defaults.MD_TYPE))
-            return
-
-        if args.command == 'pipeline':
-            from .api import convert_images
-            images = _require(images, 'images')
-            work = _resolve_work(work_value, images)
-            base_dir = _path_value(_pick(args, cfg, 'base_dir', ('base_dir',)), cfg_base) \
-                or (str(cfg_base) if cfg_base else None)
-            middlewares = _middlewares(
-                _pick(args, cfg, 'middleware', ('middlewares',)), cfg_base)
-            raw_chapters = args.chapters if args.chapters is not None else cfg.get('chapters')
-            chapters = _load_chapters(raw_chapters, None if args.chapters is not None else cfg_base)
-            convert_images(
-                images, work_dir=str(work), out_dir=out_value, base_dir=base_dir,
-                engine=_pick(args, cfg, 'engine', ('engine',), defaults.ENGINE),
-                force=_pick(args, cfg, 'force', ('force',), defaults.FORCE),
-                start=_pick(args, cfg, 'start', ('start',)),
-                end=_pick(args, cfg, 'end', ('end',)),
-                split_long_image_max_ratio=_pick(
-                    args, cfg, 'split_long_image_max_ratio',
-                    ('split_long_image_max_ratio',), defaults.SPLIT_LONG_IMAGE_MAX_RATIO),
-                split_slice_max_h=_pick(args, cfg, 'split_slice_max_h',
-                                        ('split_slice_max_h',), defaults.SPLIT_SLICE_MAX_H),
-                split_slice_min_h=_pick(args, cfg, 'split_slice_min_h',
-                                        ('split_slice_min_h',), defaults.SPLIT_SLICE_MIN_H),
-                split_slice_ratio=_pick(args, cfg, 'split_slice_ratio',
-                                        ('split_slice_ratio',), defaults.SPLIT_SLICE_RATIO),
-                min_heading_ratio=_pick(args, cfg, 'min_heading_ratio',
-                                        ('min_heading_ratio',), defaults.MIN_HEADING_RATIO),
-                bold_thickness_ratio=_pick(
-                    args, cfg, 'bold_thickness_ratio',
-                    ('bold_thickness_ratio',), defaults.BOLD_THICKNESS_RATIO),
-                heading_plain_ratio=_pick(args, cfg, 'heading_plain_ratio',
-                                          ('heading_plain_ratio',), defaults.HEADING_PLAIN_RATIO),
-                heading_page_base=_pick(args, cfg, 'heading_page_base',
-                                        ('heading_page_base',), defaults.HEADING_PAGE_BASE),
-                bold_use_page_h=_pick(args, cfg, 'bold_use_page_h',
-                                      ('bold_use_page_h',), defaults.BOLD_USE_PAGE_H),
-                ocr_fix_global=_pick(args, cfg, 'ocr_fix_global',
-                                     ('ocr_fix_global',), defaults.OCR_FIX_GLOBAL),
-                middlewares=middlewares, chapters=chapters, log=print,
-                type=_pick(args, cfg, 'type', ('type',), defaults.MD_TYPE),
-                pages=args.pages,
-                page_margin=_pick(args, cfg, 'page_margin', ('page_margin',),
-                                  defaults.PAGE_MARGIN),
-                font_family=_pick(args, cfg, 'font_family', ('font_family',)),
-                justify=_pick(args, cfg, 'justify', ('justify',),
-                              defaults.LAYED_JUSTIFY),
-                width_scale=_pick(args, cfg, 'width_scale', ('width_scale',),
-                                  defaults.LAYED_WIDTH_SCALE),
-                letter_spacing=_pick(args, cfg, 'letter_spacing',
-                                     ('letter_spacing',)),
-                punct_compress=_pick(args, cfg, 'punct_compress',
-                                     ('punct_compress',)),
-                font_height_ratio=_pick(
-                    args, cfg, 'layed_font_ratio', ('layed_font_ratio',),
-                    defaults.LAYED_FONT_HEIGHT_RATIO),
-                min_font_pt=_pick(args, cfg, 'layed_min_font_pt',
-                                  ('layed_min_font_pt',),
-                                  defaults.LAYED_MIN_FONT_PT),
-                assets_dir=(
-                    _path_value(_pick(args, cfg, 'assets_dir', ('assets_dir',)),
-                                cfg_base) or images))
             _print_summary(work, _pick(args, cfg, 'type', ('type',),
                                        defaults.MD_TYPE))
             return

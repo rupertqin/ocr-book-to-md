@@ -31,7 +31,23 @@ pip install p2md
 
 ## 快速开始（CLI）
 
-无子命令直接转换：
+**不带子命令就是全流程**（ocr → middleware → detect → build）；`ocr` / `detect` / `build` 只是它的分解步骤，用来单独重跑某一阶段。全流程本身没有独立命令名。
+
+```bash
+# 目录 = 一本书：逐章产出 Markdown
+p2md ./assets --out ./output
+
+# 用配置文件（assets_dir / work / output 都写在里面）
+p2md --config ./config.yaml
+
+# 指定 OCR 引擎并忽略缓存
+p2md ./assets --work ./work --out ./out --engine rapidocr --force
+
+# 单张图片（页号固定为 1）
+p2md --image ./one.png --work ./work --out ./output
+```
+
+逐张快速转换（给的是**文件/通配符**时，每张单独出一份 Markdown，不切章节）：
 
 ```bash
 # 打印 Markdown 到终端
@@ -42,32 +58,13 @@ p2md -o ~/Desktop/book_imgs/*.jpg
 # 01.jpg -> 01.md，02.jpg -> 02.md
 ```
 
-传 `--work` / `--out` 时，中间产物和 Markdown 分别写入指定目录：
-
-```bash
-p2md --work ./work --out ./output ~/Desktop/book_imgs/*.jpg
-```
-
-分步与全流程子命令：
-
-```bash
-# 全流程：图片 → OCR → 版面检测 → Markdown
-p2md pipeline --images ./assets --work ./work --out ./out
-
-# 指定 OCR 引擎并忽略缓存
-p2md pipeline --images ./assets --work ./work --engine rapidocr --force
-
-# 单张图片（页号固定为 1）
-p2md pipeline --image ./one.png --work ./work --out ./output
-```
-
-分步执行：
+分解步骤：
 
 ```bash
 p2md ocr      --images ./assets --work ./work
 p2md detect   --work ./work
 p2md build    --work ./work --chapters ./chapters.json   # 可选人工章节
-p2md build    --work ./work --type layed                 # 版式还原（见 `还原方式`）
+p2md build    --work ./work --type layed                 # 版式还原（见「还原方式」）
 ```
 
 ## 配置文件
@@ -75,7 +72,7 @@ p2md build    --work ./work --type layed                 # 版式还原（见 `�
 CLI 支持显式传入配置文件：
 
 ```bash
-p2md pipeline --config ./config.yaml
+p2md --config ./config.yaml
 ```
 
 配置文件为 YAML 或 JSON，命令行参数优先于配置文件。配置文件中的相对路径按**配置文件所在目录**解析；未知的顶层键会直接报错。
@@ -218,14 +215,17 @@ result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 | `--type` | `normal` | 还原方式：`normal` / `layed` / `image`（见下） |
 | `--pages` / `--page-margin` / `--font-family` / `--assets` | — | layed / image 的排版与页图参数 |
 
-### `p2md pipeline`
+### 默认模式（全流程）
 
-包含 `ocr`、`detect`、`build` 的全部参数，另加：
+不带子命令时跑 ocr → middleware → detect → build，参数取 `ocr`、`detect`、`build` 的并集，另加：
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
+| `IMAGE...`（位置参数） | 无 | 目录 = 整本书（逐章）；文件/通配符 = 逐张各出一份 Markdown |
+| `--images` / `--image` | config `assets_dir` | 输入图片目录或单张图片（总按整本书处理） |
+| `-o, --write` | 关 | 逐张转换并把 Markdown 写到源图片旁（强制逐张模式） |
 | `--config` | 无 | 显式 YAML/JSON 配置文件；命令行参数优先 |
-| `--out` | `None` | 最终交付目录；不传则只留在 `<work>/content` |
+| `--work` / `--out` | config `work` / `output` | 中间产物目录 / 最终交付目录 |
 | `--base-dir` | 当前目录或配置文件目录 | 中间件脚本相对路径的解析基准 |
 | `--middleware` | 无 | 中间件脚本路径，可重复，按序执行；脚本须定义 `process(ocr_dir, base_dir)` |
 | `--chapters` | 自动分章 | 人工章节结构 JSON 路径 |
@@ -234,7 +234,7 @@ result = p2md.convert_image("./one.png", work_dir="./work", out_dir="./output")
 
 ### 还原方式（`--type`）
 
-`build` 与 `pipeline` 都用 `--type` 选择 Markdown 的还原方式：
+默认模式与 `build` 都用 `--type` 选择 Markdown 的还原方式：
 
 | `type` | 内容目录 | 组织方式 |
 |---|---|---|

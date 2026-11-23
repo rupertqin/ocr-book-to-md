@@ -178,7 +178,7 @@ def test_cli_config_applies_and_flags_override(monkeypatch, tmp_path):
 
     monkeypatch.setattr(api, "convert_images", fake_convert)
 
-    monkeypatch.setattr(sys, "argv", ["p2md", "pipeline", "--config", str(path)])
+    monkeypatch.setattr(sys, "argv", ["p2md", "--config", str(path)])
     cli.main()
     assert captured["images"] == str(tmp_path / "assets")
     assert captured["work_dir"] == str(tmp_path / "work")
@@ -190,7 +190,7 @@ def test_cli_config_applies_and_flags_override(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         sys, "argv",
-        ["p2md", "pipeline", "--config", str(path), "--engine", "swift", "--no-force"])
+        ["p2md", "--config", str(path), "--engine", "swift", "--no-force"])
     cli.main()
     assert captured["engine"] == "swift"
     assert captured["force"] is False

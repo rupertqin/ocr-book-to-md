@@ -471,7 +471,7 @@ def prepare_normal(work_dir):
     content = paths.content_dir(work_dir)
     if not content.is_dir() or not sorted(content.glob("article_*.md")):
         raise SystemExit(
-            f"错误：{content} 下没有 article_*.md；normal 方式需要先跑 p2md build / pipeline")
+            f"错误：{content} 下没有 article_*.md；normal 方式需要先跑 p2md（全流程）或 p2md build")
     print(f"  normal 直接使用已有 Markdown：{content}")
     return content
 

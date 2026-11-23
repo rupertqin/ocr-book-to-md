@@ -33,7 +33,7 @@ def test_cli_loads_chapters_file_from_config_dir(monkeypatch, tmp_path):
         captured.update(kwargs)
 
     monkeypatch.setattr(api, "convert_images", fake_convert)
-    monkeypatch.setattr(sys, "argv", ["p2md", "pipeline", "--config", str(path)])
+    monkeypatch.setattr(sys, "argv", ["p2md", "--config", str(path)])
     cli.main()
     assert captured["chapters"] == chapters
 
@@ -92,7 +92,7 @@ def test_cli_reports_convert_error_without_traceback(monkeypatch, capsys):
         raise api.ConvertError("boom")
 
     monkeypatch.setattr(api, "convert_images", fake_convert)
-    monkeypatch.setattr(sys, "argv", ["p2md", "pipeline", "--images", "."])
+    monkeypatch.setattr(sys, "argv", ["p2md", "--images", "."])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 1

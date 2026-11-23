@@ -69,10 +69,12 @@ def test_cli_explicit_flags():
     assert args.force is True
     assert args.split_long_image_max_ratio == 4.5
 
+    # 默认模式（无子命令）：--images 直接喂整本管线
     pipe = parser.parse_args([
-        "pipeline", "--images", "img", "--work", "w", "--out", "o",
+        "_direct", "--images", "img", "--work", "w", "--out", "o",
         "--middleware", "a.py", "--middleware", "b.py",
     ])
+    assert pipe.images_opt == "img"
     assert pipe.work == "w"
     assert pipe.out == "o"
     assert pipe.middleware == ["a.py", "b.py"]
