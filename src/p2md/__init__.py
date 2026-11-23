@@ -16,7 +16,7 @@ from .api import (
 )
 from .restore import MD_TYPES, organize, prepare_image, prepare_layed, prepare_normal
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "ConvertError",
